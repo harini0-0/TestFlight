@@ -15,6 +15,7 @@ from audit.chain import AuditLog
 from compiler.llm_compile import CompilerFailure, LlmCompiler
 from compiler.pipeline import compiler_prompt_hash, score_rule
 from compiler.recording_model import RecordingModel
+from compiler.references import build_clause_network
 from compiler.testgen import template_cases
 from control_engine.ledger import ZERO, evaluate_condition, natural_language_applicable
 from control_engine.sandbox import run_suite
@@ -684,6 +685,54 @@ class Platform:
             "replay": replay,
         }
 
+    def clause_network(self, tenant_id: str, document_id: str) -> dict:
+        """Cross-document clause reference graph for the spider-web view."""
+        pack = self._document(tenant_id, document_id)
+        bundle = self._active(tenant_id, document_id) or self._latest(tenant_id, document_id)
+        if bundle is None:
+            raise PlatformError(404, "no bundle")
+        from compiler.pipeline import is_boilerplate
+
+        from compiler import segment_clauses
+
+        sources = self._network_sources(pack)
+        documents = []
+        clause_inputs = []
+        for index, (kind, filename, body) in enumerate(sources, start=1):
+            documents.append({"index": index, "kind": kind, "filename": filename, "title": _document_title(body)})
+            # Segment each source on its own so a document's clauses are attributed
+            # to that document, not bled into the previous one after flattening.
+            for clause in segment_clauses(body):
+                clause_inputs.append(
+                    {
+                        "clause_id": f"{index}.{clause.section}",
+                        "section": clause.section,
+                        "heading": clause.heading,
+                        "text": clause.text,
+                        "commercial": not is_boilerplate(clause),
+                        "document_index": index,
+                    }
+                )
+        network = build_clause_network(documents, clause_inputs)  # type: ignore[arg-type]
+        return {
+            "document_id": document_id,
+            "bundle_id": bundle.id,
+            "supplier_key": bundle.supplier_key,
+            "active": bool(bundle.active),
+            "status": bundle.status,
+            **network,
+        }
+
+    def _network_sources(self, pack: DocumentRow) -> list[tuple[str, str, str]]:
+        """Read-only view of the pack's source documents in compile order."""
+        children = self._pack_files(pack.tenant_id, pack.id)
+        if children:
+            ordered = sorted(children, key=lambda row: (PACK_KINDS.index(row.kind) if row.kind in PACK_KINDS else 99, row.filename))
+            return [(row.kind, row.filename, row.body) for row in ordered if row.body.strip()]
+        if pack.body.strip():
+            return [(pack.kind if pack.kind in PACK_KINDS else "contract", pack.filename, pack.body)]
+        return []
+
     def portfolio(self, tenant_id: str) -> dict:
         nodes = []
         edges = []
@@ -1122,6 +1171,16 @@ def _supplier_from_text(text: str) -> str:
         if line.lower().startswith("supplier:"):
             return line.split(":", 1)[1].strip().lower().replace(" ", "-")
     return "unknown"
+
+
+def _document_title(body: str) -> str:
+    """First meaningful line of a document, used as a citable title."""
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.lower().startswith(("supplier:", "buyer:", "effective date:", "currency:", "contract year:")):
+            continue
+        return stripped[:120]
+    return ""
 
 
 def _event_date(event: Event) -> date:

@@ -6,7 +6,7 @@ export const metadata = { title: "AI procurement control", description: "Compile
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body>
+      <body suppressHydrationWarning>
         <Shell>{children}</Shell>
       </body>
     </html>

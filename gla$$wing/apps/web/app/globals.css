@@ -153,6 +153,84 @@ body {
   border: none;
 }
 
+.react-flow__node-web {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+
+.clause-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: white;
+  border: 1px solid #e6e2da;
+  border-radius: 999px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+}
+
+.clause-node-hub {
+  padding: 8px 16px 8px 8px;
+  border-width: 2px;
+}
+
+.clause-node-ext {
+  padding: 6px 14px 6px 8px;
+  border-style: dashed;
+  border-width: 2px;
+  background: #f8fafc;
+}
+
+.clause-node-spoke {
+  padding: 5px 12px;
+  border-radius: 8px;
+  max-width: 168px;
+}
+
+.clause-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  flex: none;
+}
+
+.clause-node-body {
+  min-width: 0;
+}
+
+.clause-kicker {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.clause-title {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #0f172a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+.clause-handle {
+  width: 1px;
+  height: 1px;
+  min-width: 1px;
+  min-height: 1px;
+  background: transparent;
+  border: none;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  opacity: 0;
+}
+
 @keyframes radar-pulse {
   0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.7); }
   70% { box-shadow: 0 0 0 14px rgba(220, 38, 38, 0); }

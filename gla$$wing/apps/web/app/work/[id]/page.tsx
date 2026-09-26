@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import { RuleGraph } from "@/components/RuleGraph";
 import { API_URL, api, fail, token } from "@/lib/api";
@@ -382,6 +383,8 @@ export default function WorkPage() {
         <section key="engine" className="step-pane flex-1 min-h-0 flex flex-col gap-2">
           <div className="flex items-center justify-between gap-3 shrink-0">
             <p className="text-sm text-stone-700">Hover a node for the clause, formula, and ledger. Click a rule to edit it. A live edit becomes the next draft and does not replace the running engine until you approve it.</p>
+            <div className="flex items-center gap-2 shrink-0">
+            <Link className="btn" href={`/work/${params.id}/network`}>Clause network</Link>
             <button
               className="btn btn-primary shrink-0"
               disabled={!pack.bundle || openRebates.length > 0 || Boolean(busy)}
@@ -392,6 +395,7 @@ export default function WorkPage() {
             >
               Approve rules engine
             </button>
+            </div>
           </div>
           {!pack.bundle && <p className="text-sm text-ink shrink-0">Process the documents first.</p>}
           {openRebates.length > 0 && <p className="text-sm text-ink shrink-0">Tick the open rebate boxes on Process before you approve.</p>}

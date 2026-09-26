@@ -433,6 +433,17 @@ def control_map(document_id: str, principal: Principal = Depends(current_user), 
         return {}
 
 
+@app.get("/v1/contracts/{document_id}/clause-network")
+def clause_network(document_id: str, principal: Principal = Depends(current_user), session: Session = Depends(db)) -> dict:
+    require_role(principal, "procurement_manager", "ap_analyst", "auditor")
+    platform = Platform(session)
+    try:
+        return platform.clause_network(principal.tenant_id, document_id)
+    except PlatformError as exc:
+        _guard(exc)
+        return {}
+
+
 @app.get("/v1/contracts/{document_id}/replay-diff")
 def replay_diff(document_id: str, bundle_id: str, principal: Principal = Depends(current_user), session: Session = Depends(db)) -> dict:
     require_role(principal, "procurement_manager", "auditor")

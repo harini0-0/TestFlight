@@ -1,0 +1,34 @@
+Supplier: Acme Field Services
+
+Master Services Agreement
+Buyer: Northline Industrial
+Effective date: 2026-02-01
+Contract year: anniversary of the effective date
+Currency: USD
+
+1. Appointment
+Acme Field Services provides maintenance, calibration, and on-site repair labor to Northline plants in Ohio and Ontario. This agreement covers services only. Parts and materials are billed separately and sit outside the labor rate card.
+
+2. Ordering
+Buyer authorizes work by written statement of work. Each statement of work names the site, the scope, the rate, and the window. Acme confirms within two business days.
+
+3. Fees and invoicing
+Acme invoices monthly in arrears for labor performed. Each invoice states the statement of work, the technician hours, and the applicable rate. A charge above the rate card is a leak against that line.
+
+4. Rate card
+Standard technician labor is billed at $95.00 per hour. Emergency call-out labor is billed at $150.00 per hour. Travel is billed at $0.65 per mile.
+
+5. Service levels
+Acme responds to a priority-one outage within four hours and restores service within twenty-four hours. A quarter that falls below a 95 percent on-time response rate is a service-level miss.
+
+6. Confidentiality
+Site drawings, rates, and incident reports are confidential. Neither party publishes the other's information.
+
+7. Liability
+Acme's liability for defective work is limited to re-performance of that work or a credit for the labor charged for it. This cap does not apply to injury or to damage caused by Acme's gross negligence.
+
+8. Term and termination
+The primary term runs three years from the effective date. Either party may terminate for a material breach that is not cured within thirty days after written notice.
+
+9. Governing law
+This agreement is governed by the laws of the State of Ohio. This section is entire agreement boilerplate and carries no commercial obligation.

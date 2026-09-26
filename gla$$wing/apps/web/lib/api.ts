@@ -7,6 +7,7 @@ const warnings: Record<string, string> = {
   "template tests are failing": "Template tests are failing. Review the results before approval.",
   "template cases cannot be waived": "Template tests cannot be waived. Fix the failing case before approval.",
   "upload at least one document": "Upload at least one document before processing.",
+  "no bundle": "Process this workspace's documents into an engine before viewing the clause network.",
   "only a draft can be edited before approval": "Only a draft can be edited before approval.",
   "transaction id already used": "That invoice number was already checked. Use a new invoice number.",
   "human review can be required only on a warned clause": "A person can be required only on a warned clause.",

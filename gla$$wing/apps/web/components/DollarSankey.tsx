@@ -11,6 +11,10 @@ function dollars(amount: number): string {
   return amount.toLocaleString("en-US", { style: "currency", currency: "USD" });
 }
 
+function num(value: number | undefined, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
 export function DollarSankey({
   monitored,
   cleared,
@@ -38,6 +42,16 @@ export function DollarSankey({
     })),
   };
 
+  if (parts.length === 0) {
+    return (
+      <svg width="100%" viewBox="0 0 920 300" role="img" aria-label="No dollar flow to display yet">
+        <text x={460} y={150} textAnchor="middle" fontSize={14} fill="#64748b">
+          No dollars to flow yet.
+        </text>
+      </svg>
+    );
+  }
+
   return (
     <svg width="100%" viewBox="0 0 920 300" role="img" aria-label="Dollar flow from monitored spend into cleared, at risk, and recovered">
       <Sankey<FlowNode, FlowLink> root={root} nodeWidth={18} nodePadding={36} size={[520, 260]}>
@@ -50,14 +64,14 @@ export function DollarSankey({
                 fill="none"
                 stroke={link.color}
                 strokeOpacity={0.55}
-                strokeWidth={Math.max(link.width ?? 1, 8)}
+                strokeWidth={Math.max(num(link.width, 1), 8)}
               />
             ))}
             {graph.nodes.map((node, index) => {
-              const x0 = node.x0 ?? 0;
-              const x1 = node.x1 ?? 0;
-              const y0 = node.y0 ?? 0;
-              const y1 = node.y1 ?? 0;
+              const x0 = num(node.x0);
+              const x1 = num(node.x1);
+              const y0 = num(node.y0);
+              const y1 = num(node.y1);
               const onLeft = index === 0;
               return (
                 <g key={node.name}>
