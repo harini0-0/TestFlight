@@ -56,6 +56,41 @@ export function token(): string {
   return localStorage.getItem("glasswing_token") || "";
 }
 
+export type ProgressEvent = { index: number; total: number; detail: string };
+
+export async function streamNdjson<T>(path: string, init: RequestInit, onProgress: (event: ProgressEvent) => void): Promise<T> {
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${token()}`);
+  headers.set("Accept", "application/x-ndjson");
+  if (init.body && !headers.has("Content-Type") && typeof init.body === "string") headers.set("Content-Type", "application/json");
+  const response = await fetch(`${API_URL}${path}`, { ...init, headers });
+  if (!response.ok || !response.body) fail(await response.text(), response.statusText || "The request failed");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result: T | null = null;
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    buffer += decoder.decode(chunk.value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line) as { type?: string; detail?: string; index?: number; total?: number; body?: T };
+      if (event.type === "progress") {
+        onProgress({ index: event.index || 0, total: event.total || 0, detail: event.detail || "Working" });
+      } else if (event.type === "error") {
+        fail(JSON.stringify({ detail: event.detail || "processing failed" }), "Processing failed");
+      } else if (event.type === "result") {
+        result = event.body ?? null;
+      }
+    }
+  }
+  if (result === null) fail("", "Processing ended before a result");
+  return result;
+}
+
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token()}`);

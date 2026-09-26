@@ -20,6 +20,22 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {token.json()['access_token']}"}
 
 
+def test_documents_upload_without_a_category():
+    headers = _headers()
+    created = client.post("/v1/packs", json={"supplier_key": "Northwind"}, headers=headers)
+    assert created.status_code == 200, created.text
+    pack_id = created.json()["pack_id"]
+    uploaded = client.post(
+        f"/v1/packs/{pack_id}/files",
+        content=CONTRACT.encode(),
+        headers={**headers, "X-Filename": "notes.txt", "Content-Type": "text/plain"},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    assert uploaded.json()["kind"] == "document"
+    detail = client.get(f"/v1/packs/{pack_id}", headers=headers)
+    assert detail.json()["files"] == [{"document_id": uploaded.json()["document_id"], "kind": "document", "filename": "notes.txt"}]
+
+
 def test_pack_joins_documents_into_one_engine():
     headers = _headers()
     created = client.post("/v1/packs", json={"supplier_key": "Northwind"}, headers=headers)

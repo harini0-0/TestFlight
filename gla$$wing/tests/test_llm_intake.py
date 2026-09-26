@@ -145,6 +145,101 @@ def test_compiler_retries_invalid_json_once():
     assert rules[0].rule_type == "threshold_rebate"
 
 
+def test_long_pack_is_read_in_parts_without_dropping_or_repeating_rules():
+    from glasswing_domain.windows import BATCH_CHARS
+
+    calls = {"n": 0}
+    second = {
+        **RULE,
+        "rule_id": "rule-rebate-2",
+        "source_clause_ids": ["rebate-2"],
+        "clause_text": "A separate 3% rebate once spend exceeds $500,000",
+    }
+    progress: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        user = json.loads(request.content)["messages"][1]["content"]
+        assert f"part {calls['n']} of 2" in user
+        if calls["n"] == 1:
+            return httpx.Response(200, json=_envelope({"rules": [RULE]}))
+        assert "Already captured" in user
+        return httpx.Response(200, json=_envelope({"rules": [RULE, second]}))
+
+    model = LlmCompiler("acme", _client(handler).complete, MODEL_ID)
+    _clauses, rules, _embeddings = compile_document(
+        "clause\n\n" + ("term " * (BATCH_CHARS // 5)),
+        "acme",
+        Decimal("100000"),
+        model,
+        on_progress=progress.append,
+    )
+    assert calls["n"] == 2
+    assert [rule.rule_id for rule in rules] == ["rule-rebate", "rule-rebate-2"]
+    assert any(item["index"] == 2 and item["total"] == 2 for item in progress)
+
+
+def test_later_part_receives_the_cited_clause_from_an_earlier_part():
+    from glasswing_domain.windows import BATCH_CHARS
+
+    filler = "padding " * ((BATCH_CHARS // 8) + 50)
+    document = "1. Discount\nCustomer discount is 6%.\n\n" + filler + "\n\nAdobe pricing is pursuant to Section 1.\n"
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        user = json.loads(request.content)["messages"][1]["content"]
+        if "pursuant to Section 1" in user:
+            seen["later"] = user
+        return httpx.Response(200, json=_envelope({"rules": [RULE]}))
+
+    model = LlmCompiler("acme", _client(handler).complete, MODEL_ID)
+    compile_document(document, "acme", Decimal("100000"), model)
+    assert "Customer discount is 6%." in seen["later"]
+    assert "pursuant to Section 1" in seen["later"]
+
+
+def test_similar_clause_from_another_part_is_attached():
+    from glasswing_domain.related import index_clauses, related_block
+
+    text = (
+        "The administrative fee is 0.75% of the customer price.\n\n"
+        "Governing law is the State of Texas and notices must be in writing.\n\n"
+        "Prices include the administrative fee."
+    )
+    window = "Prices include the administrative fee."
+    block = related_block(window, index_clauses(text))
+    assert "The administrative fee is 0.75% of the customer price." in block
+    assert "Governing law" not in block
+
+
+def test_long_invoice_is_read_in_parts_and_lines_are_kept():
+    from glasswing_domain.windows import BATCH_CHARS
+
+    calls = {"n": 0}
+    first = json.loads(json.dumps(INVOICE))
+    second_line = {
+        "sku": "Widget B",
+        "description": "Widget B",
+        "category": "goods",
+        "quantity": "1",
+        "unit_price": {"amount": "4", "currency": "USD"},
+        "extended_amount": {"amount": "4", "currency": "USD"},
+        "rebate_amount": {"amount": "0", "currency": "USD"},
+    }
+    later = json.loads(json.dumps(INVOICE))
+    later["events"][0]["lines"] = [second_line]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, json=_envelope(first))
+        return httpx.Response(200, json=_envelope(later))
+
+    events = normalize_unstructured("line\n\n" + ("item " * (BATCH_CHARS // 5)), _client(handler).complete, "acme")
+    assert calls["n"] == 2
+    assert [line.sku for line in events[0].lines] == ["Widget A", "Widget B"]
+
+
 def test_compiler_failure_after_two_invalid_replies():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_envelope({"rules": []}))

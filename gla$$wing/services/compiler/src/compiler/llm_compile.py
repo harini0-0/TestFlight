@@ -1,4 +1,4 @@
-"""Turn a whole document pack into Rule IR with one model call and one retry."""
+"""Turn a document pack into Rule IR. Long packs are read in overlapping parts so nothing is dropped."""
 
 from __future__ import annotations
 
@@ -9,10 +9,13 @@ from typing import Any
 from glasswing_domain.llm_json import extract_json
 from glasswing_domain.ontology import Clause
 from glasswing_domain.prompts import prompt_text
+from glasswing_domain.related import index_clauses, related_block
 from glasswing_domain.rules import RuleIR, engine_triggers
+from glasswing_domain.windows import split_text
 from pydantic import ValidationError
 
 Complete = Callable[[str, str], str]
+Progress = Callable[[dict[str, Any]], None]
 
 
 class CompilerFailure(Exception):
@@ -27,22 +30,116 @@ class LlmCompiler:
         self.model_id = model_id
         self._complete = complete
 
-    def compile_pack(self, text: str) -> tuple[list[Clause], list[RuleIR]]:
-        return compile_pack_text(text, self.supplier_key, self._complete)
+    def compile_pack(self, text: str, on_progress: Progress | None = None) -> tuple[list[Clause], list[RuleIR]]:
+        return compile_pack_text(text, self.supplier_key, self._complete, on_progress=on_progress)
 
 
-def compile_pack_text(text: str, supplier_key: str, complete: Complete) -> tuple[list[Clause], list[RuleIR]]:
+def compile_pack_text(
+    text: str,
+    supplier_key: str,
+    complete: Complete,
+    on_progress: Progress | None = None,
+) -> tuple[list[Clause], list[RuleIR]]:
+    parts = split_text(text)
+    if not parts:
+        raise CompilerFailure("the model could not produce a valid rule engine: the document was empty")
     system = _system_prompt()
-    user = f"supplier_key: {supplier_key}\n\nDocument:\n{text}"
+    indexed = index_clauses(text)
+    rules: list[RuleIR] = []
+    seen: set[str] = set()
+    total = len(parts)
+    _report(on_progress, 0, total, f"The documents are split into {total} part{'s' if total != 1 else ''}. Each part is read in full.")
+    for index, part in enumerate(parts, start=1):
+        _report(on_progress, index, total, f"Reading part {index} of {total}. {len(rules)} rule{'s' if len(rules) != 1 else ''} kept so far.")
+        batch_rules = _compile_part(
+            system,
+            supplier_key,
+            complete,
+            part,
+            index,
+            total,
+            _digest(rules),
+            related_block(part, indexed),
+            allow_empty=total > 1,
+        )
+        for rule in batch_rules:
+            fingerprint = _fingerprint(rule)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            rules.append(rule.model_copy(update={"rule_id": _unique_rule_id(rule.rule_id, rules)}))
+    if not rules:
+        raise CompilerFailure("the model could not produce a valid rule engine: no commercial rules were returned")
+    _report(on_progress, total, total, f"Finished reading {total} part{'s' if total != 1 else ''}. {len(rules)} rules kept.")
+    return _clauses_for(rules, None), rules
+
+
+def _compile_part(
+    system: str,
+    supplier_key: str,
+    complete: Complete,
+    part: str,
+    index: int,
+    total: int,
+    digest: str,
+    related: str,
+    allow_empty: bool,
+) -> list[RuleIR]:
+    header = (
+        f"supplier_key: {supplier_key}\n"
+        f"This is part {index} of {total} of one document pack.\n"
+        "Extract every commercial term written in this part: discounts, rebates, thresholds, "
+        "volume tiers, fees, payment terms, renewal dates, and service levels.\n"
+        "Do not skip a term because it looks minor.\n"
+        "Do not repeat a term listed as already captured unless this part changes the number.\n"
+    )
+    if related:
+        header += (
+            "\nRelated clauses from other parts. Use them to interpret this part. "
+            "Do not emit a second copy of a rule already listed as captured.\n"
+            f"{related}\n"
+        )
+    if digest:
+        header += f"\nAlready captured:\n{digest}\n"
+    user = f"{header}\nDocument part:\n{part}"
     last_error = ""
     for _attempt in range(2):
         prompt = user if not last_error else f"{user}\n\nThe previous JSON failed validation:\n{last_error}\nReturn corrected JSON only."
         try:
             raw = complete(system, prompt)
-            return _parse_pack(raw, supplier_key)
+            _clauses, rules = _parse_pack(raw, supplier_key, allow_empty=allow_empty)
+            return rules
         except ValueError as exc:
             last_error = _short(exc)
-    raise CompilerFailure(f"the model could not produce a valid rule engine: {last_error}")
+    raise CompilerFailure(f"the model could not produce a valid rule engine: part {index} of {total} could not be read: {last_error}")
+
+
+def _report(on_progress: Progress | None, index: int, total: int, detail: str) -> None:
+    if on_progress is not None:
+        on_progress({"index": index, "total": total, "detail": detail})
+
+
+def _digest(rules: list[RuleIR]) -> str:
+    lines = []
+    for rule in rules[-40:]:
+        text = " ".join((rule.clause_text or rule.assertion or rule.rule_type).split())
+        lines.append(f"- {rule.rule_type}: {text[:180]}")
+    return "\n".join(lines)
+
+
+def _fingerprint(rule: RuleIR) -> str:
+    text = " ".join((rule.clause_text or "").lower().split())
+    return f"{rule.rule_type}|{text[:220]}"
+
+
+def _unique_rule_id(rule_id: str, existing: list[RuleIR]) -> str:
+    taken = {rule.rule_id for rule in existing}
+    if rule_id not in taken:
+        return rule_id
+    number = 2
+    while f"{rule_id}-{number}" in taken:
+        number += 1
+    return f"{rule_id}-{number}"
 
 
 def _system_prompt() -> str:
@@ -59,7 +156,7 @@ def _system_prompt() -> str:
     )
 
 
-def _parse_pack(raw: str, supplier_key: str) -> tuple[list[Clause], list[RuleIR]]:
+def _parse_pack(raw: str, supplier_key: str, allow_empty: bool = False) -> tuple[list[Clause], list[RuleIR]]:
     try:
         payload = extract_json(raw)
     except (ValueError, json.JSONDecodeError) as exc:
@@ -98,6 +195,8 @@ def _parse_pack(raw: str, supplier_key: str) -> tuple[list[Clause], list[RuleIR]
     if errors:
         raise ValueError("; ".join(errors))
     if not rules:
+        if allow_empty:
+            return [], []
         raise ValueError("no commercial rules were returned")
     supplied = payload.get("clauses") if isinstance(payload, dict) else None
     return _clauses_for(rules, supplied if isinstance(supplied, list) else None), rules
