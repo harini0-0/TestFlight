@@ -23,6 +23,7 @@ from glasswing_adapters.runtime import (
     configure_telemetry,
     langfuse_trace,
     looks_like_document,
+    visible_text,
 )
 from glasswing_domain.schema_export import export_schemas
 from glasswing_domain.transactions import ClockTick, Invoice, PerformanceEvent, SpendEvent
@@ -124,25 +125,40 @@ def _wants_progress(request: Request) -> bool:
     return "application/x-ndjson" in request.headers.get("accept", "")
 
 
-def _progress_response(session: Session, work: Callable[[Callable[[dict], None]], dict]) -> StreamingResponse:
-    """Run the model work on this request and stream a line each time a part finishes."""
+def _progress_response(work: Callable[[Session, Callable[[dict], None]], dict]) -> StreamingResponse:
+    """Run the model work on its own session and stream a line each time a part finishes.
+
+    The request session closes when this response is returned, which is before the
+    model finishes. Saving on that session drops the engine and leaves the page on
+    the first process step.
+    """
     events: queue.Queue = queue.Queue()
 
     def on_progress(event: dict) -> None:
         events.put({"type": "progress", **event})
 
     def run() -> None:
+        session = SessionLocal()
         try:
-            body = work(on_progress)
+            body = work(session, on_progress)
+            session.commit()
+            try:
+                if relay_unpublished(session, default_publisher()):
+                    session.commit()
+            except Exception:
+                session.rollback()
             events.put({"type": "result", "body": body})
         except PlatformError as exc:
-            if exc.status != 422:
+            if exc.status == 422:
+                session.commit()
+            else:
                 session.rollback()
             events.put({"type": "error", "detail": exc.detail})
         except Exception:
             session.rollback()
             events.put({"type": "error", "detail": "processing failed"})
         finally:
+            session.close()
             events.put(None)
 
     threading.Thread(target=run, daemon=True).start()
@@ -301,26 +317,49 @@ async def upload_pack_file(
     return {"document_id": row.id, "kind": row.kind, "filename": row.filename}
 
 
+def _readable_upload(row) -> str:
+    """Re-read the original file so the model gets page text, not an older raw extract."""
+    if row.storage_uri:
+        try:
+            text = LocalPdfParser().extract_text(blobs.get(row.storage_uri), row.filename or "document")
+        except Exception:
+            text = ""
+        if text.strip():
+            return text
+    return visible_text(row.body or "")
+
+
+def _process_pack(session: Session, tenant_id: str, pack_id: str, actor: str, on_progress=None) -> dict:
+    platform = Platform(session)
+    from compiler.pipeline import document_hash
+
+    for row in platform._pack_files(tenant_id, pack_id):
+        text = _readable_upload(row)
+        if text != (row.body or ""):
+            row.body = text
+            row.sha256 = document_hash(text)
+    bundle, report = platform.process_pack(tenant_id, pack_id, actor, on_progress=on_progress)
+    return {
+        "bundle_id": bundle.id,
+        "version": bundle.version,
+        "status": bundle.status,
+        "active": bool(bundle.active),
+        "rules": [rule.model_dump(mode="json") for rule in platform._rules(bundle)],
+        "tests": report,
+    }
+
+
 @app.post("/v1/packs/{pack_id}/process")
 def process_pack(pack_id: str, request: Request, principal: Principal = Depends(current_user), session: Session = Depends(db)):
     require_role(principal, "procurement_manager")
-    platform = Platform(session)
 
-    def payload(on_progress=None) -> dict:
-        bundle, report = platform.process_pack(principal.tenant_id, pack_id, principal.sub, on_progress=on_progress)
-        return {
-            "bundle_id": bundle.id,
-            "version": bundle.version,
-            "status": bundle.status,
-            "active": bool(bundle.active),
-            "rules": [rule.model_dump(mode="json") for rule in platform._rules(bundle)],
-            "tests": report,
-        }
+    def payload(work_session: Session, on_progress=None) -> dict:
+        return _process_pack(work_session, principal.tenant_id, pack_id, principal.sub, on_progress)
 
     if _wants_progress(request):
-        return _progress_response(session, payload)
+        return _progress_response(payload)
     try:
-        return payload()
+        return payload(session)
     except PlatformError as exc:
         return _or_store(exc)
 
@@ -523,15 +562,14 @@ async def interpret_transaction(
         text = LocalPdfParser().extract_text(raw, filename)
     if not text.strip():
         raise HTTPException(status_code=422, detail="no text could be read from the invoice")
-    platform = Platform(session)
 
-    def payload(on_progress=None) -> dict:
-        return platform.interpret_unstructured(principal.tenant_id, text, supplier or None, on_progress=on_progress)
+    def payload(work_session: Session, on_progress=None) -> dict:
+        return Platform(work_session).interpret_unstructured(principal.tenant_id, text, supplier or None, on_progress=on_progress)
 
     if _wants_progress(request):
-        return _progress_response(session, payload)
+        return _progress_response(payload)
     try:
-        return payload()
+        return payload(session)
     except PlatformError as exc:
         _guard(exc)
         return {}
