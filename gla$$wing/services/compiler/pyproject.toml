@@ -2,7 +2,7 @@
 name = "glasswing-compiler"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["glasswing-domain"]
+dependencies = ["glasswing-domain", "anthropic>=1.0.0", "openai>=1.40"]
 
 [build-system]
 requires = ["hatchling"]

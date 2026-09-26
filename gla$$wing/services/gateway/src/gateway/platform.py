@@ -12,9 +12,9 @@ from actions.machine import approve as approve_action
 from actions.machine import execute as execute_action
 from actions.machine import propose as propose_action
 from audit.chain import AuditLog
-from compiler.llm_compile import CompilerFailure, LlmCompiler
-from compiler.pipeline import compiler_prompt_hash, score_rule
-from compiler.recording_model import RecordingModel
+from compiler.model_factory import build_model
+from compiler.pipeline import HEADING as CLAUSE_HEADING
+from compiler.pipeline import compiler_prompt_hash, score_rule, strip_markup
 from compiler.testgen import template_cases
 from control_engine.ledger import ZERO, evaluate_condition, natural_language_applicable
 from control_engine.sandbox import run_suite
@@ -35,6 +35,7 @@ from glasswing_adapters.db import (
 )
 from glasswing_adapters.llm import LlmError, chat_client_from_env, llm_enabled
 from glasswing_adapters.runtime import hash_api_key
+from glasswing_domain.evaluation import TestCase
 from glasswing_domain.events import AuditEvent
 from glasswing_domain.ids import uuid7
 from glasswing_domain.money import Money
@@ -75,7 +76,10 @@ class PlatformError(Exception):
 
 
 class ModelBridge:
-    def __init__(self, model: RecordingModel) -> None:
+    # `model` is whatever build_model() returned: RecordingModel or
+    # ClaudeModel. Both expose .judge()/.investigate() with the same
+    # signature, so no protocol/import is needed here.
+    def __init__(self, model) -> None:
         self.model = model
 
     def complete(self, *, model_id: str, system: str, user: str, schema_name: str) -> str:
@@ -84,7 +88,14 @@ class ModelBridge:
         if schema_name == "Investigation":
             return self.model.investigate(system, user)
         if schema_name == "AgentCases":
-            return "[]"
+            # `user` is the rule's own model_dump_json() (see run_tests()) —
+            # author_cases wants the typed RuleIR, not the raw string.
+            # RecordingModel.author_cases() already returns "[]" unconditionally,
+            # so this is a no-op for the deterministic default path.
+            try:
+                return self.model.author_cases(RuleIR.model_validate_json(user))
+            except Exception:
+                return "[]"
         return "{}"
 
 
@@ -234,7 +245,11 @@ class Platform:
 
     def compile(self, tenant_id: str, document_id: str, actor: str) -> BundleRow:
         document = self._document(tenant_id, document_id)
+<<<<<<< HEAD
         model = self._model_for_compile(document.supplier_key)
+=======
+        model = build_model(document.supplier_key, SONNET)
+>>>>>>> a9a10e4 (feat: Implement LLM-backed model schemas and factory)
         threshold = Decimal(self.settings(tenant_id).high_value_threshold)
         try:
             clauses, rules, embeddings = compile_document(document.body, document.supplier_key, threshold, model)
@@ -312,14 +327,15 @@ class Platform:
     def run_tests(self, tenant_id: str, bundle_id: str) -> dict:
         bundle = self._bundle(tenant_id, bundle_id)
         rules = self._rules(bundle)
-        model = RecordingModel(bundle.supplier_key)
+        model = build_model(bundle.supplier_key)
         bridge = ModelBridge(model)
         cases = []
         for rule in rules:
             if rule.needs_confirmation:
                 continue
             cases.extend(template_cases(rule))
-            bridge.complete(model_id=SONNET, system="test-agent", user=rule.rule_id, schema_name="AgentCases")
+            raw = bridge.complete(model_id=SONNET, system="test-agent", user=rule.model_dump_json(), schema_name="AgentCases")
+            cases.extend(_agent_cases(rule, raw))
         judge = self._judge(bridge)
         report = run_suite(rules, cases, judge)
         bundle.test_run_id = report.run_id
@@ -342,7 +358,7 @@ class Platform:
         if not bundle.test_run_id:
             self.run_tests(tenant_id, bundle_id)
             rules = self._rules(bundle)
-        report = run_suite(rules, [case for rule in rules for case in template_cases(rule)], self._judge(ModelBridge(RecordingModel(bundle.supplier_key))))
+        report = run_suite(rules, [case for rule in rules for case in template_cases(rule)], self._judge(ModelBridge(build_model(bundle.supplier_key))))
         for result in report.results:
             if result.case_id in waived:
                 if result.author == "template":
@@ -516,7 +532,7 @@ class Platform:
                 )
             ],
         }
-        bridge = ModelBridge(RecordingModel(bundle.supplier_key))
+        bridge = ModelBridge(build_model(bundle.supplier_key))
         result = investigate_exception(
             bridge,
             {"finding_id": finding_id, "clause_ids": payload.get("clause_ids", []), "trace": payload.get("formula_trace")},
@@ -811,7 +827,7 @@ class Platform:
         results = []
         document = self._document(tenant_id, bundle.document_id)
         effective = date.fromisoformat(document.effective_date)
-        bridge = ModelBridge(RecordingModel(bundle.supplier_key))
+        bridge = ModelBridge(build_model(bundle.supplier_key))
         seq = self.session.query(EvaluationRow).count() + 1
         for rule in self._rules(bundle):
             period = rule.period
@@ -1107,14 +1123,63 @@ def _dump(value) -> str:
     return json.dumps(value)
 
 
+def _agent_cases(rule: RuleIR, raw: str) -> list[TestCase]:
+    """Parse an AI-authored test-case batch (AgentCasesOutput.cases, dumped as
+    a plain JSON list — see ClaudeModel/DeepSeekModel.author_cases). Bad or
+    empty output degrades to no extra cases, same as the deterministic
+    default (RecordingModel.author_cases() always returns "[]")."""
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(items, list):
+        return []
+
+    cases: list[TestCase] = []
+    for item in items:
+        try:
+            events = item.get("events") or []
+            # The sandbox validates events strictly and would raise on the
+            # whole suite; a model can emit the wrong event shape, so drop a
+            # case whose events don't parse rather than fail every case.
+            for payload in events:
+                _events.validate_python(payload)
+            amount = item.get("expected_amount")
+            cases.append(
+                TestCase(
+                    case_id=f"case-{uuid7()}",
+                    rule_id=rule.rule_id,
+                    author="agent",
+                    title=item["title"],
+                    events=events,
+                    expected_outcome=item["expected_outcome"],
+                    expected_amount=Decimal(amount) if amount else None,
+                )
+            )
+        except Exception:
+            continue
+    return cases
+
+
 def _prepare_source(index: int, label: str, filename: str, body: str) -> str:
+    # Raw SEC EDGAR exhibits ship as HTML/SGML, not plain text — the decimal
+    # heading check below (and the compiler's own segmentation) both need
+    # clean text to find real structure, or the whole document collapses
+    # into one clause (see strip_markup's docstring).
+    cleaned = strip_markup(body.strip())
     namespaced = _HEADING_LINE.sub(
         lambda match: f"{index}.{match.group('section')}{match.group('dot')}{match.group('space')}",
-        body.strip(),
+        cleaned,
     )
     if _HEADING_LINE.search(namespaced):
         return namespaced
-    return f"{index}. {label} ({filename})\n{body.strip()}"
+    if CLAUSE_HEADING.search(cleaned):
+        # Already has recognizable structure the compiler can segment on its
+        # own (e.g. ARTICLE-style headings) — don't wrap it under one
+        # synthetic label, or that label becomes the only top-level clause
+        # and everything else is swallowed as its body.
+        return cleaned
+    return f"{index}. {label} ({filename})\n{cleaned}"
 
 
 def _supplier_from_text(text: str) -> str:

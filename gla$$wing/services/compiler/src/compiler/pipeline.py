@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import re
 from datetime import date
 from decimal import Decimal
@@ -13,12 +14,41 @@ from glasswing_domain.ontology import Clause, Eligibility, Period
 from glasswing_domain.prompts import prompt_sha256
 from glasswing_domain.rules import Obligation, RuleIR, Threshold
 
-HEADING = re.compile(r"(?m)^(?P<section>\d+(?:\.\d+)*)\.?\s+(?P<heading>[^\n]+)$")
+# Matches "8.2 Rebate" / "12. Governing Law" style numbering (Meridian
+# samples, the acme golden test) OR "ARTICLE 3 - Repayment" style numbering
+# (common in real SEC EDGAR exhibits). Alternation, not two passes, so a
+# document can't accidentally match both and double-count a line.
+HEADING = re.compile(
+    r"(?mi)^\s*(?:ARTICLE\s+(?P<article_num>\d+)\s*[-.:]?\s*(?P<article_heading>[^\n]*)"
+    r"|(?P<section>\d+(?:\.\d+)*)\.?\s+(?P<heading>[^\n]+))$"
+)
 BOILERPLATE = ("governing law", "entire agreement", "whereas", "counterparts", "notices.")
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_BLANK_LINES_RE = re.compile(r"\n\s*\n+")
+
+
+def strip_markup(text: str) -> str:
+    """Strip SGML/HTML wrappers (raw SEC EDGAR exhibits ship as <DOCUMENT>/
+    <TYPE>/<TEXT>-tagged HTML, not plain text). A no-op on already-clean text."""
+    if "<" not in text:
+        return text
+    cleaned = _TAG_RE.sub(" ", text)
+    cleaned = html.unescape(cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = _BLANK_LINES_RE.sub("\n", cleaned)
+    return cleaned
 
 
 def parse_blocks(text: str) -> list[tuple[str, str, str]]:
-    """Return (section, heading, body) for numbered clauses. Preamble is section 0."""
+    """Return (section, heading, body) for numbered/ARTICLE-numbered clauses.
+    Preamble is section 0.
+
+    Many contracts (bilingual SEC filings especially) repeat the entire
+    document in a second language after the original — once an ARTICLE
+    number repeats, everything after that point is a duplicate translation,
+    not new content, so parsing stops there.
+    """
     matches = list(HEADING.finditer(text))
     blocks: list[tuple[str, str, str]] = []
     if not matches:
@@ -28,16 +58,30 @@ def parse_blocks(text: str) -> list[tuple[str, str, str]]:
         preamble = text[: matches[0].start()].strip()
         if preamble:
             blocks.append(("0", "Preamble", preamble))
+
+    seen_article_numbers: set[int] = set()
     for index, match in enumerate(matches):
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         body = text[start:end].strip()
-        heading = match.group("heading").strip()
-        blocks.append((match.group("section"), heading, body))
+
+        if match.group("article_num"):
+            number = int(match.group("article_num"))
+            if number in seen_article_numbers:
+                break
+            seen_article_numbers.add(number)
+            section = str(number)
+            heading = (match.group("article_heading") or "").strip()
+        else:
+            section = match.group("section")
+            heading = match.group("heading").strip()
+
+        blocks.append((section, heading, body))
     return blocks
 
 
 def segment_clauses(text: str) -> list[Clause]:
+    text = strip_markup(text)
     clauses: list[Clause] = []
     for section, heading, body in parse_blocks(text):
         full = body if section == "0" else f"{heading}\n{body}".strip()
