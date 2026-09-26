@@ -1,0 +1,32 @@
+# secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# node
+node_modules/
+.next/
+dist/
+build/
+
+# data and models (keep big files out of git)
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.onnx
+data/raw/
+
+# os and editors
+.DS_Store
+.vscode/
+.idea/
