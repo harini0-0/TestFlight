@@ -457,6 +457,27 @@ def edit_contract(document_id: str, body: dict, principal: Principal = Depends(c
     return {"bundle_id": bundle.id, "version": bundle.version, "status": bundle.status, "active": bool(bundle.active)}
 
 
+@app.post("/v1/contracts/{document_id}/clause-edit")
+def clause_edit(document_id: str, body: dict, principal: Principal = Depends(current_user), session: Session = Depends(db)) -> dict:
+    require_role(principal, "procurement_manager")
+    reject_client_tenant(principal, body)
+    platform = Platform(session)
+    try:
+        result = platform.edit_clause_cascade(
+            principal.tenant_id,
+            document_id,
+            body["child_document_id"],
+            body.get("text"),
+            principal.sub,
+            body.get("changed_sections"),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=422, detail=f"missing field {exc}") from exc
+    except PlatformError as exc:
+        return _or_store(exc)
+    return result
+
+
 @app.post("/v1/bundles/{bundle_id}/human-switch")
 def human_switch(bundle_id: str, body: dict, principal: Principal = Depends(current_user), session: Session = Depends(db)) -> dict:
     require_role(principal, "procurement_manager")

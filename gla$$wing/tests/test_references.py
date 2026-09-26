@@ -1,4 +1,4 @@
-from compiler.references import build_clause_network
+from compiler.references import build_clause_network, cascade_targets
 from fastapi.testclient import TestClient
 from gateway.main import app
 
@@ -78,6 +78,32 @@ def test_external_instrument_becomes_a_marker():
     assert "ext:exhibit-a" in external_ids
     assert "ext:schedule-3" in external_ids
     assert all(ref["resolved"] is False for ref in network["references"])
+
+
+def test_cascade_finds_dependents_of_an_edited_clause():
+    network = build_clause_network(DOCUMENTS, CLAUSES)
+    # Editing the annual goods rebate (doc 3): the growth rebate (4.1) sits on top
+    # of it and the master clause 1.1 links to the rebate base -> both are stranded.
+    cascade = cascade_targets(network, ["3.1"])
+    assert "4.1" in cascade["impacted_clause_ids"]  # growth rebate -> doc 3
+    assert "1.1" in cascade["impacted_clause_ids"]  # "rebate base" -> primary rebate doc
+    # The edited clause's own outgoing links are not reported as stranded.
+    assert "3.1" not in cascade["impacted_clause_ids"]
+    assert cascade["changed_clause_ids"] == ["3.1"]
+
+
+def test_cascade_follows_document_level_references():
+    network = build_clause_network(DOCUMENTS, CLAUSES)
+    # Editing a price line (2.1) strands master clause 1.4, which points at the
+    # price schedule *document* generically ("the attached price schedule").
+    cascade = cascade_targets(network, ["2.1"])
+    assert "1.4" in cascade["impacted_clause_ids"]
+
+
+def test_cascade_is_empty_for_an_unknown_clause():
+    network = build_clause_network(DOCUMENTS, CLAUSES)
+    cascade = cascade_targets(network, ["9.9"])
+    assert cascade["impacted_clause_ids"] == []
 
 
 def _headers() -> dict:

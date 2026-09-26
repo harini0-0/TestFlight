@@ -15,7 +15,7 @@ from audit.chain import AuditLog
 from compiler.llm_compile import CompilerFailure, LlmCompiler
 from compiler.pipeline import compiler_prompt_hash, score_rule
 from compiler.recording_model import RecordingModel
-from compiler.references import build_clause_network
+from compiler.references import build_clause_network, cascade_targets
 from compiler.testgen import template_cases
 from control_engine.ledger import ZERO, evaluate_condition, natural_language_applicable
 from control_engine.sandbox import run_suite
@@ -209,6 +209,14 @@ class Platform:
 
     def process_pack(self, tenant_id: str, pack_id: str, actor: str, on_progress=None) -> tuple[BundleRow, dict]:
         pack = self._pack(tenant_id, pack_id)
+        bundle = self._recompile_pack(tenant_id, pack, actor, on_progress=on_progress)
+        if on_progress:
+            on_progress({"index": 1, "total": 1, "detail": "Running practice checks on the rules just read."})
+        report = self.run_tests(tenant_id, bundle.id)
+        return bundle, report
+
+    def _recompile_pack(self, tenant_id: str, pack: DocumentRow, actor: str, on_progress=None) -> BundleRow:
+        """Rebuild the pack's flattened body from its sources and compile a draft."""
         sources = self._pack_sources(pack)
         if not sources:
             raise PlatformError(409, "upload at least one document")
@@ -221,11 +229,7 @@ class Platform:
         pack.body = combined
         pack.sha256 = document_hash(combined)
         pack.status = "stored"
-        bundle = self.compile(tenant_id, pack.id, actor, on_progress=on_progress)
-        if on_progress:
-            on_progress({"index": 1, "total": 1, "detail": "Running practice checks on the rules just read."})
-        report = self.run_tests(tenant_id, bundle.id)
-        return bundle, report
+        return self.compile(tenant_id, pack.id, actor, on_progress=on_progress)
 
     def edit_rule_field(self, tenant_id: str, document_id: str, rule_id: str, field: str, value: str, actor: str) -> tuple[BundleRow, bool]:
         bundle = self._latest(tenant_id, document_id)
@@ -412,6 +416,102 @@ class Platform:
         self.session.add(clone)
         self._audit(tenant_id, actor, "bundle.drafted", [clone.id], {"from": active.id})
         return clone
+
+    def edit_clause_cascade(
+        self,
+        tenant_id: str,
+        pack_id: str,
+        child_document_id: str,
+        text: str | None,
+        actor: str,
+        changed_sections: list[str] | None = None,
+    ) -> dict:
+        """Edit a clause in one pack document, recompile, and report the blast radius.
+
+        The whole pack recompiles into a single draft bundle (rules for every
+        document are regenerated). The clause network is then used to find, in a
+        single hop, the clauses in *other* documents that reference what changed
+        and the draft rules that derive from them - so a reviewer sees what to
+        scrutinise before approving through the usual flow.
+        """
+        pack = self._pack(tenant_id, pack_id)
+        child = self._document(tenant_id, child_document_id)
+        if child.pack_id != pack.id:
+            raise PlatformError(400, "document is not part of this pack")
+        children = self._ordered_children(pack)
+        index = next((position for position, row in enumerate(children, start=1) if row.id == child.id), None)
+        if index is None:
+            raise PlatformError(409, "cascade needs a multi-document pack with this document as a source")
+
+        from compiler import segment_clauses
+
+        old_sections = {clause.section: clause.text for clause in segment_clauses(child.body)}
+        if text is not None and text != child.body:
+            child.body = text
+            child.sha256 = document_hash(text)
+            child.status = "stored"
+        new_sections = {clause.section: clause.text for clause in segment_clauses(child.body)}
+
+        if changed_sections:
+            touched = {str(section) for section in changed_sections}
+        else:
+            touched = {section for section, body in new_sections.items() if old_sections.get(section) != body}
+            touched |= {section for section in old_sections if section not in new_sections}
+        changed_clause_ids = {f"{index}.{section}" for section in touched}
+
+        bundle = self._recompile_pack(tenant_id, pack, actor)
+
+        network = self._pack_network(pack)
+        cascade = cascade_targets(network, changed_clause_ids)
+        affected = changed_clause_ids | set(cascade["impacted_clause_ids"])
+
+        impacted_rules = [
+            {
+                "rule_id": rule.rule_id,
+                "rule_type": rule.rule_type,
+                "severity": rule.severity,
+                "warned": rule.warned(),
+                "source_clause_ids": rule.source_clause_ids,
+                "reason": "edited" if set(rule.source_clause_ids) & changed_clause_ids else "cross-reference",
+            }
+            for rule in self._rules(bundle)
+            if set(rule.source_clause_ids) & affected
+        ]
+
+        self._audit(
+            tenant_id,
+            actor,
+            "clause.edited_cascade",
+            [bundle.id],
+            {
+                "child_document_id": child.id,
+                "changed": sorted(changed_clause_ids),
+                "impacted_clauses": cascade["impacted_clause_ids"],
+                "impacted_rules": [rule["rule_id"] for rule in impacted_rules],
+            },
+        )
+        return {
+            "bundle_id": bundle.id,
+            "version": bundle.version,
+            "status": bundle.status,
+            "active": bool(bundle.active),
+            "impact": {
+                "document_id": pack.id,
+                "child_document_id": child.id,
+                "child_index": index,
+                "changed_clause_ids": cascade["changed_clause_ids"],
+                "impacted_clause_ids": cascade["impacted_clause_ids"],
+                "impacted_rules": impacted_rules,
+                "references": cascade["references"],
+                "external": network.get("external", []),
+            },
+        }
+
+    def _ordered_children(self, pack: DocumentRow) -> list[DocumentRow]:
+        """Pack children in the same order _network_sources indexes them."""
+        children = self._pack_files(pack.tenant_id, pack.id)
+        ordered = sorted(children, key=lambda row: (PACK_KINDS.index(row.kind) if row.kind in PACK_KINDS else 99, row.filename))
+        return [row for row in ordered if row.body.strip()]
 
     def set_human_switch(self, tenant_id: str, bundle_id: str, rule_id: str, required: bool, actor: str) -> RuleIR:
         bundle = self._bundle(tenant_id, bundle_id)
@@ -707,6 +807,18 @@ class Platform:
         bundle = self._active(tenant_id, document_id) or self._latest(tenant_id, document_id)
         if bundle is None:
             raise PlatformError(404, "no bundle")
+        network = self._pack_network(pack)
+        return {
+            "document_id": document_id,
+            "bundle_id": bundle.id,
+            "supplier_key": bundle.supplier_key,
+            "active": bool(bundle.active),
+            "status": bundle.status,
+            **network,
+        }
+
+    def _pack_network(self, pack: DocumentRow) -> dict:
+        """Build the cross-document clause graph from a pack's source documents."""
         from compiler.pipeline import is_boilerplate
 
         from compiler import segment_clauses
@@ -729,15 +841,7 @@ class Platform:
                         "document_index": index,
                     }
                 )
-        network = build_clause_network(documents, clause_inputs)  # type: ignore[arg-type]
-        return {
-            "document_id": document_id,
-            "bundle_id": bundle.id,
-            "supplier_key": bundle.supplier_key,
-            "active": bool(bundle.active),
-            "status": bundle.status,
-            **network,
-        }
+        return build_clause_network(documents, clause_inputs)  # type: ignore[arg-type]
 
     def _network_sources(self, pack: DocumentRow) -> list[tuple[str, str, str]]:
         """Read-only view of the pack's source documents in compile order."""

@@ -38,6 +38,34 @@ type Network = {
   external: External[];
   references: Reference[];
 };
+type PackFile = { document_id: string; kind: string; filename: string };
+type Pack = { pack_id: string; files: PackFile[] };
+type ImpactRule = { rule_id: string; rule_type: string; severity: string; warned: boolean; source_clause_ids: string[]; reason: string };
+type Impact = {
+  document_id: string;
+  child_document_id: string;
+  child_index: number;
+  changed_clause_ids: string[];
+  impacted_clause_ids: string[];
+  impacted_rules: ImpactRule[];
+  references: Reference[];
+  external: External[];
+};
+type EditResult = { bundle_id: string; version: number; status: string; active: boolean; impact: Impact };
+
+// Rebuild a child document's body from its clauses, applying the edit to one of
+// them, so the backend re-segments to the same sections it started with.
+function reconstructBody(clauses: Clause[], editedId: string, editedText: string): string {
+  const ordered = [...clauses].sort((a, b) => a.section.localeCompare(b.section, undefined, { numeric: true }));
+  return (
+    ordered
+      .map((clause) => {
+        const text = (clause.id === editedId ? editedText : clause.text).trim();
+        return clause.section === "0" ? text : `${clause.section}. ${text}`;
+      })
+      .join("\n\n") + "\n"
+  );
+}
 
 const KIND_COLORS: Record<string, string> = {
   contract: "#0f172a",
@@ -94,6 +122,12 @@ export function ClauseWeb({ documentId }: { documentId: string }) {
   const [edges, setEdges] = useState<Edge[]>([]);
   const [hover, setHover] = useState<Meta | null>(null);
   const [hoverAt, setHoverAt] = useState<{ x: number; y: number } | null>(null);
+  const [files, setFiles] = useState<PackFile[]>([]);
+  const [selected, setSelected] = useState<Clause | null>(null);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [impact, setImpact] = useState<Impact | null>(null);
   const paneRef = useRef<HTMLDivElement>(null);
   const flowRef = useRef<ReactFlowInstance | null>(null);
 
@@ -101,7 +135,38 @@ export function ClauseWeb({ documentId }: { documentId: string }) {
     api<Network>(`/v1/contracts/${documentId}/clause-network`)
       .then(setNetwork)
       .catch(() => setError("This workspace has no processed engine yet. Process the documents first."));
+    api<Pack>(`/v1/packs/${documentId}`)
+      .then((pack) => setFiles(pack.files || []))
+      .catch(() => setFiles([]));
   }, [documentId]);
+
+  async function applyEdit() {
+    if (!selected || !network) return;
+    const doc = network.documents.find((item) => item.index === selected.document_index);
+    const file = doc ? files.find((item) => item.filename === doc.filename) : undefined;
+    if (!file) {
+      setSaveError("Could not match this clause to a source document to edit.");
+      return;
+    }
+    const docClauses = network.clauses.filter((item) => item.document_index === selected.document_index);
+    const body = reconstructBody(docClauses, selected.id, draft);
+    setSaving(true);
+    setSaveError("");
+    try {
+      const result = await api<EditResult>(`/v1/contracts/${documentId}/clause-edit`, {
+        method: "POST",
+        body: JSON.stringify({ child_document_id: file.document_id, text: body, changed_sections: [selected.section] }),
+      });
+      const fresh = await api<Network>(`/v1/contracts/${documentId}/clause-network`);
+      setNetwork(fresh);
+      setImpact(result.impact);
+      setSelected(null);
+    } catch (err) {
+      setSaveError(String((err as Error)?.message || err));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   const refsBySource = useMemo(() => {
     const map = new Map<string, Reference[]>();
@@ -227,10 +292,31 @@ export function ClauseWeb({ documentId }: { documentId: string }) {
         } as Edge;
       });
 
-    setNodes([...placed, ...clauseNodes]);
-    setEdges([...membership, ...referenceEdges]);
+    const changedIds = new Set((impact?.changed_clause_ids || []).map((cid) => `clause:${cid}`));
+    const strandedIds = new Set((impact?.impacted_clause_ids || []).map((cid) => `clause:${cid}`));
+    const impactPairs = new Set((impact?.references || []).map((ref) => `${ref.source}->${ref.target}`));
+    const hasImpact = impact != null;
+
+    const styledNodes = [...placed, ...clauseNodes].map((node) => {
+      if (!hasImpact) return node;
+      if (changedIds.has(node.id)) return { ...node, style: { outline: "3px solid #2563eb", outlineOffset: 2, borderRadius: 10 } };
+      if (strandedIds.has(node.id)) return { ...node, style: { outline: "3px solid #dc2626", outlineOffset: 2, borderRadius: 10 } };
+      const isHub = placed.some((hub) => hub.id === node.id);
+      return isHub ? node : { ...node, style: { opacity: 0.25 } };
+    });
+
+    const styledEdges = [...membership, ...referenceEdges].map((edge) => {
+      if (!hasImpact) return edge;
+      if (impactPairs.has(`${edge.source}->${edge.target}`)) {
+        return { ...edge, style: { ...edge.style, stroke: "#dc2626", strokeWidth: 3 }, markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: "#dc2626" }, animated: true };
+      }
+      return { ...edge, style: { ...edge.style, opacity: 0.15 } };
+    });
+
+    setNodes(styledNodes);
+    setEdges(styledEdges);
     window.setTimeout(() => flowRef.current?.fitView({ padding: 0.18, duration: 400 }), 60);
-  }, [network, showAll]);
+  }, [network, showAll, impact]);
 
   if (error) return <p className="text-sm text-stone-600">{error}</p>;
   if (!network) return <p className="text-sm text-stone-600 flex items-center gap-2"><span className="spinner" /> Building the clause web</p>;
@@ -247,6 +333,7 @@ export function ClauseWeb({ documentId }: { documentId: string }) {
           <input type="checkbox" checked={showAll} onChange={(event) => setShowAll(event.target.checked)} />
           Show every commercial clause
         </label>
+        <span className="text-xs text-slate-500">Click a clause to edit it and see the impact.</span>
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-stone-600">
           {(Object.keys(REF_STYLE) as Reference["kind"][]).map((kind) => (
             <span key={kind} className="inline-flex items-center gap-1.5">
@@ -288,6 +375,14 @@ export function ClauseWeb({ documentId }: { documentId: string }) {
             setHover(null);
             setHoverAt(null);
           }}
+          onNodeClick={(_, node) => {
+            const source = node.data.source as Clause | Document | External | undefined;
+            if (source && "clause_id" in source) {
+              setSelected(source as Clause);
+              setDraft((source as Clause).text);
+              setSaveError("");
+            }
+          }}
         >
           <Background gap={18} color="#e6e2da" />
           <Controls />
@@ -325,6 +420,56 @@ export function ClauseWeb({ documentId }: { documentId: string }) {
                 ) : null}
               </>
             ) : null}
+          </aside>
+        )}
+        {selected && (
+          <aside className="absolute right-3 top-3 z-20 w-96 max-h-[80%] overflow-auto panel p-4 text-sm shadow-lg space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs uppercase tracking-wide text-slate-500">
+                Edit clause §{selected.section} · {network.documents.find((doc) => doc.index === selected.document_index)?.label || ""}
+              </div>
+              <button className="text-xs text-slate-500 hover:underline" onClick={() => setSelected(null)}>Close</button>
+            </div>
+            <textarea
+              className="w-full h-40 rounded border border-line p-2 font-mono text-xs"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+            />
+            {saveError && <p className="text-xs text-red-600">{saveError}</p>}
+            <button className="btn" disabled={saving} onClick={applyEdit}>
+              {saving ? "Recompiling…" : "Apply edit & show impact"}
+            </button>
+            <p className="text-xs text-slate-500">
+              Recompiles the pack into a draft engine and highlights the clauses in other documents that reference this one. Approve as usual afterward.
+            </p>
+          </aside>
+        )}
+        {impact && (
+          <aside className="absolute left-3 bottom-3 z-20 w-96 max-h-[70%] overflow-auto panel p-4 text-sm shadow-lg space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="text-xs uppercase tracking-wide text-slate-500">Edit impact · draft engine</div>
+              <button className="text-xs text-slate-500 hover:underline" onClick={() => setImpact(null)}>Clear</button>
+            </div>
+            <div>
+              <span className="inline-block h-2 w-2 rounded-full align-middle" style={{ background: "#2563eb" }} /> Edited{" "}
+              <b>{impact.changed_clause_ids.join(", ") || "—"}</b>
+            </div>
+            <div>
+              <span className="inline-block h-2 w-2 rounded-full align-middle" style={{ background: "#dc2626" }} />{" "}
+              <span className="font-semibold text-red-600">{impact.impacted_clause_ids.length}</span> clause
+              {impact.impacted_clause_ids.length === 1 ? "" : "s"} in other documents may be stranded
+              {impact.impacted_clause_ids.length ? `: ${impact.impacted_clause_ids.join(", ")}` : "."}
+            </div>
+            <div className="pt-1 border-t border-line">
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+                {impact.impacted_rules.length} rule{impact.impacted_rules.length === 1 ? "" : "s"} to review
+              </div>
+              {impact.impacted_rules.map((rule) => (
+                <div key={rule.rule_id} className="text-xs text-slate-600">
+                  • {rule.rule_id} <span className="text-slate-400">({rule.rule_type}, {rule.reason})</span>
+                </div>
+              ))}
+            </div>
           </aside>
         )}
       </div>

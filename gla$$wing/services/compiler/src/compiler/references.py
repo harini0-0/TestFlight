@@ -22,6 +22,7 @@ document. References resolve in three ways, most trustworthy first:
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from typing import Any, TypedDict
 
 # Curated, multi-word only. Single words like "rebate" or "discount" appear too
@@ -245,6 +246,44 @@ def build_clause_network(documents: list[Document], clauses: list[ClauseInput]) 
         ],
         "external": list(external_nodes.values()),
         "references": references,
+    }
+
+
+def cascade_targets(network: dict[str, Any], changed_clause_ids: Iterable[str]) -> dict[str, Any]:
+    """Single-hop blast radius of an edit, read off the clause network.
+
+    ``changed_clause_ids`` are bare ids (``"3.1"``) in the same
+    ``{document_index}.{section}`` scheme the network and the compiled rules
+    share. Returns the clauses in *other* documents that reference the edited
+    clauses - the ones a change may strand - plus the reference edges that
+    justify each hit. Only direct (one-hop) references are followed; a clause
+    reached through a chain of two edges is not reported.
+    """
+    changed = {str(cid) for cid in changed_clause_ids}
+    clause_by_id = {clause["clause_id"]: clause for clause in network.get("clauses", [])}
+    # Documents that own a changed clause: a generic "the rebate schedule" style
+    # link into such a document may depend on the edited clause too.
+    changed_doc_indexes = {
+        clause_by_id[cid]["document_index"] for cid in changed if cid in clause_by_id
+    }
+
+    impacted: set[str] = set()
+    hits: list[dict[str, Any]] = []
+    for ref in network.get("references", []):
+        source = ref.get("source_clause_id")
+        if source is None or source in changed:
+            # The edited clause's own outgoing links are recompiled with it; we
+            # only want the *dependents* that point back at what changed.
+            continue
+        precise = ref.get("target_clause_id") in changed
+        doc_level = ref.get("target_clause_id") is None and ref.get("target_index") in changed_doc_indexes
+        if precise or doc_level:
+            impacted.add(source)
+            hits.append(ref)
+    return {
+        "changed_clause_ids": sorted(changed),
+        "impacted_clause_ids": sorted(impacted),
+        "references": hits,
     }
 
 
