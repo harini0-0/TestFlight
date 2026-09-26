@@ -333,13 +333,20 @@ export default function WorkPage() {
                 setBusy("Compiling the engine");
                 setAiProgress(null);
                 try {
-                  const processed = await streamNdjson<{ tests: { results: typeof report }; bundle_id: string }>(`/v1/packs/${params.id}/process`, { method: "POST" }, setAiProgress);
-                  setReport(processed.tests.results || []);
+                  const processed = await streamNdjson<{ tests: { results: typeof report }; rules: Rule[]; bundle_id: string }>(`/v1/packs/${params.id}/process`, { method: "POST" }, setAiProgress);
+                  setReport(processed.tests?.results || []);
                   setAwaitingRetest(false);
-                  setMessage("Processing finished. Review the tests, then view the engine.");
-                  await load();
-                } catch {
-                  setMessage("");
+                  const body = await load();
+                  const rebatesOpen = (body.bundle?.rules || processed.rules || []).some((rule) => rule.needs_confirmation.includes("application"));
+                  if (rebatesOpen) {
+                    setMessage("Processing finished. Confirm how each rebate applies, then view the engine.");
+                    setStep("process");
+                  } else {
+                    setMessage("Processing finished. The rule engine is ready to review.");
+                    setStep("engine");
+                  }
+                } catch (error) {
+                  setMessage(error instanceof Error ? error.message : "Processing failed");
                 } finally {
                   setBusy("");
                   setAiProgress(null);
