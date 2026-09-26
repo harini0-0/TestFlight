@@ -3,10 +3,10 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        ink: "#0f172a",
-        paper: "#f8fafc",
-        line: "#e2e8f0",
-        accent: "#1d4ed8",
+        ink: "#1a1d23",
+        paper: "#f6f5f3",
+        line: "#e6e2da",
+        accent: "#1f3a5f",
       },
       fontFamily: {
         sans: ['"Segoe UI"', '"Helvetica Neue"', "Arial", "sans-serif"],

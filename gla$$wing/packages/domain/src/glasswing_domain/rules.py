@@ -27,6 +27,42 @@ RuleType = Literal[
     "sla_penalty",
     "natural_language",
 ]
+
+# The engine only scores these event names. Model output often uses nearby words.
+_ENGINE_TRIGGERS: dict[str, list[str]] = {
+    "price_match": ["invoice.posted"],
+    "threshold_rebate": ["invoice.posted", "spend.adjusted"],
+    "volume_discount": ["invoice.posted"],
+    "payment_terms": ["invoice.posted"],
+    "renewal_notice": ["clock.tick"],
+    "sla_penalty": ["performance.reported"],
+}
+_TRIGGER_ALIASES = {
+    "invoice.posted": "invoice.posted",
+    "invoice_posted": "invoice.posted",
+    "invoice_line": "invoice.posted",
+    "invoice": "invoice.posted",
+    "spend.adjusted": "spend.adjusted",
+    "spend_adjusted": "spend.adjusted",
+    "performance.reported": "performance.reported",
+    "period_close": "performance.reported",
+    "quarter_close": "performance.reported",
+    "clock.tick": "clock.tick",
+    "notice_window": "clock.tick",
+}
+
+
+def engine_triggers(rule_type: str, trigger: list[str]) -> list[str]:
+    """Map a rule onto the event names the engine actually scores."""
+    fixed = _ENGINE_TRIGGERS.get(rule_type)
+    if fixed is not None:
+        return list(fixed)
+    mapped: list[str] = []
+    for item in trigger:
+        canonical = _TRIGGER_ALIASES.get(item.strip().lower().replace(" ", "_"))
+        if canonical and canonical not in mapped:
+            mapped.append(canonical)
+    return mapped or ["invoice.posted"]
 ValueBand = Literal["low", "high", "unknown"]
 RiskBand = Literal["low", "high"]
 

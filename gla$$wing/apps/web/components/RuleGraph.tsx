@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Background,
   Controls,
@@ -12,6 +12,7 @@ import {
   type Edge,
   type Node,
   type NodeProps,
+  type ReactFlowInstance,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api } from "@/lib/api";
@@ -29,7 +30,7 @@ type Graph = {
 
 const COLORS: Record<string, string> = {
   contract: "#0f172a",
-  clause: "#1d4ed8",
+  clause: "#1f3a5f",
   threshold_rebate: "#b45309",
   price_match: "#0f766e",
   volume_discount: "#7c3aed",
@@ -96,7 +97,7 @@ const FIELDS: Record<string, Array<{ field: string; label: string; options?: str
 };
 
 function EngineNode({ data }: NodeProps) {
-  const color = String(data.color || "#1d4ed8");
+  const color = String(data.color || "#1f3a5f");
   return (
     <div className="engine-node">
       <Handle type="target" position={Position.Left} className="engine-handle" />
@@ -111,6 +112,7 @@ function EngineNode({ data }: NodeProps) {
 }
 
 const nodeTypes = { engine: EngineNode };
+const noSpotlight: string[] = [];
 
 function titleFor(node: MapNode): string {
   if (node.kind === "finding") return money(node.label);
@@ -118,32 +120,44 @@ function titleFor(node: MapNode): string {
   return NAMES[node.kind] || node.label;
 }
 
-export function RuleGraph({ documentId, refreshKey = 0, live = false }: { documentId: string; refreshKey?: number; live?: boolean }) {
+export function RuleGraph({ documentId, refreshKey = 0, live = false, spotlight = noSpotlight }: { documentId: string; refreshKey?: number; live?: boolean; spotlight?: string[] }) {
   const [graph, setGraph] = useState<Graph | null>(null);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [cursor, setCursor] = useState(0);
   const [hover, setHover] = useState<MapNode | null>(null);
+  const [hoverAt, setHoverAt] = useState<{ x: number; y: number } | null>(null);
+  const paneRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState<MapNode | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [message, setMessage] = useState("");
+  const [layingOut, setLayingOut] = useState(true);
+  const [focusIds, setFocusIds] = useState<string[]>([]);
+  const flowRef = useRef<ReactFlowInstance | null>(null);
 
   useEffect(() => {
     api<Graph>(`/v1/contracts/${documentId}/control-map`).then((body) => {
       setGraph(body);
       setCursor(body.replay.length);
-    }).catch(() => setGraph(null));
+    }).catch(() => {
+      setGraph(null);
+      setLayingOut(false);
+    });
   }, [documentId, refreshKey]);
 
   useEffect(() => {
     if (!graph) return;
     let cancelled = false;
+    setLayingOut(true);
     const replay = graph.replay.slice(0, cursor);
     const seen = new Set(replay.map((row) => String(row.transaction_id)));
     const showAll = cursor >= graph.replay.length;
+    const watched = new Set(spotlight);
     const leakPairs = new Set(
       live
-        ? replay.filter((row) => row.outcome === "violation").map((row) => `${String(row.transaction_id)}|${String(row.rule_id)}`)
+        ? replay
+            .filter((row) => row.outcome === "violation" && (watched.size === 0 || watched.has(String(row.transaction_id))))
+            .map((row) => `${String(row.transaction_id)}|${String(row.rule_id)}`)
         : [],
     );
     const leakRules = new Set([...leakPairs].map((pair) => `rule:${pair.split("|")[1]}`));
@@ -175,7 +189,7 @@ export function RuleGraph({ documentId, refreshKey = 0, live = false }: { docume
         ...node.data,
         kicker: NAMES[node.kind] || node.column,
         title: titleFor(node),
-        color: COLORS[node.kind] || "#1d4ed8",
+        color: COLORS[node.kind] || "#1f3a5f",
         source: node,
       },
     }));
@@ -186,8 +200,11 @@ export function RuleGraph({ documentId, refreshKey = 0, live = false }: { docume
         layoutOptions: {
           "elk.algorithm": "layered",
           "elk.direction": "RIGHT",
-          "elk.spacing.nodeNode": "36",
-          "elk.layered.spacing.nodeNodeBetweenLayers": "90",
+          "elk.aspectRatio": "2.6",
+          "elk.spacing.nodeNode": "18",
+          "elk.layered.spacing.nodeNodeBetweenLayers": "72",
+          "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
+          "elk.layered.compaction.postCompaction.strategy": "EDGE_LENGTH",
         },
         children: elkNodes.map((node) => ({ id: node.id, width: 210, height: 52 })),
         edges: visibleEdges.map((edge, index) => ({ id: `e-${index}`, sources: [edge.source], targets: [edge.target] })),
@@ -195,6 +212,8 @@ export function RuleGraph({ documentId, refreshKey = 0, live = false }: { docume
     }).then((laid) => {
       if (cancelled || !laid?.children) return;
       const positions = new Map(laid.children.map((child) => [child.id, child]));
+      const focus = live ? visible.filter(leaking).map((node) => node.id) : [];
+      setFocusIds(focus);
       setNodes(
         elkNodes.map((node) => {
           const next = positions.get(node.id);
@@ -218,11 +237,58 @@ export function RuleGraph({ documentId, refreshKey = 0, live = false }: { docume
           };
         }),
       );
-    }).catch(() => undefined);
+    }).catch(() => {
+      if (!cancelled) setLayingOut(false);
+    });
     return () => {
       cancelled = true;
     };
-  }, [graph, cursor, live]);
+  }, [graph, cursor, live, spotlight]);
+
+  const nodesRef = useRef(nodes);
+  const focusRef = useRef(focusIds);
+  nodesRef.current = nodes;
+  focusRef.current = focusIds;
+
+  function frameView(flow: ReactFlowInstance) {
+    const targets = nodesRef.current.filter((node) => focusRef.current.includes(node.id));
+    if (nodesRef.current.length === 0) return;
+    if (live && targets.length) {
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const node of targets) {
+        const width = node.measured?.width ?? 210;
+        const height = node.measured?.height ?? 52;
+        minX = Math.min(minX, node.position.x);
+        minY = Math.min(minY, node.position.y);
+        maxX = Math.max(maxX, node.position.x + width);
+        maxY = Math.max(maxY, node.position.y + height);
+      }
+      const pane = paneRef.current?.getBoundingClientRect();
+      const zoomX = pane ? (pane.width - 72) / Math.max(maxX - minX, 1) : 1;
+      const zoomY = pane ? (pane.height - 72) / Math.max(maxY - minY, 1) : 1;
+      const zoom = Math.min(1.45, Math.min(zoomX, zoomY));
+      flow.setCenter((minX + maxX) / 2, (minY + maxY) / 2, { zoom, duration: 800 });
+    } else {
+      flow.fitView({ padding: 0.16, duration: 400 });
+    }
+    setLayingOut(false);
+  }
+
+  useEffect(() => {
+    const flow = flowRef.current;
+    if (!flow || nodes.length === 0) return;
+    const first = window.setTimeout(() => frameView(flow), 140);
+    const second = window.setTimeout(() => {
+      if (live && focusRef.current.length) frameView(flow);
+    }, 520);
+    return () => {
+      window.clearTimeout(first);
+      window.clearTimeout(second);
+    };
+  }, [nodes, focusIds, live]);
 
   function openEditor(node: MapNode) {
     const fields = FIELDS[node.kind] || [];
@@ -258,38 +324,69 @@ export function RuleGraph({ documentId, refreshKey = 0, live = false }: { docume
   const balance = detail.balance as string | undefined;
 
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-4 text-sm">
-        <span className="text-slate-500">Replay</span>
-        <input type="range" min={0} max={graph?.replay.length || 0} value={cursor} onChange={(event) => setCursor(Number(event.target.value))} />
-        <span>{cursor} / {graph?.replay.length || 0}</span>
+    <div className="flex h-full min-h-0 w-full flex-1 flex-col gap-2">
+      <div className="flex items-center gap-4 text-sm shrink-0">
+        <span className="text-stone-500">Replay</span>
+        <input className="flex-1" type="range" min={0} max={graph?.replay.length || 0} value={cursor} onChange={(event) => setCursor(Number(event.target.value))} />
+        <span className="tabular-nums text-stone-500">{cursor} / {graph?.replay.length || 0}</span>
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-stone-600 max-w-[52%]">
+          {LEGEND.map(([kind, label]) => (
+            <span key={kind} className="inline-flex items-center gap-1.5">
+              <span className="engine-dot" style={{ background: COLORS[kind] }} />
+              {label}
+            </span>
+          ))}
+        </div>
       </div>
-      <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-600">
-        {LEGEND.map(([kind, label]) => (
-          <span key={kind} className="inline-flex items-center gap-1.5">
-            <span className="engine-dot" style={{ background: COLORS[kind] }} />
-            {label}
-          </span>
-        ))}
-      </div>
-      <div className="relative h-[68vh] min-h-[520px] panel overflow-hidden">
+      <div ref={paneRef} className="relative flex-1 min-h-0 panel overflow-hidden">
+      {layingOut && (
+        <div className="absolute inset-0 z-30 grid place-items-center bg-paper/80">
+          <p className="text-sm text-stone-600 flex items-center gap-2"><span className="spinner" /> Laying out the graph</p>
+        </div>
+      )}
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
-        fitView
-        onNodeMouseEnter={(_event, node) => setHover((node.data.source as MapNode) || null)}
+        onInit={(instance) => {
+          flowRef.current = instance;
+          window.setTimeout(() => frameView(instance), 90);
+        }}
+        onNodeMouseEnter={(event, node) => {
+          const source = (node.data.source as MapNode) || null;
+          const pane = paneRef.current?.getBoundingClientRect();
+          const host = (event.target as HTMLElement).closest(".react-flow__node")?.getBoundingClientRect();
+          if (!source || !pane || !host) {
+            setHover(source);
+            setHoverAt(null);
+            return;
+          }
+          const cardWidth = 320;
+          const cardHeight = 220;
+          let x = host.right - pane.left + 10;
+          let y = host.top - pane.top;
+          if (x + cardWidth > pane.width - 8) x = host.left - pane.left - cardWidth - 10;
+          if (x < 8) x = 8;
+          if (y + cardHeight > pane.height - 8) y = Math.max(8, pane.height - cardHeight - 8);
+          if (y < 8) y = 8;
+          setHover(source);
+          setHoverAt({ x, y });
+        }}
+        onNodeMouseLeave={() => {
+          setHover(null);
+          setHoverAt(null);
+        }}
         onNodeClick={(_event, node) => {
           const source = node.data.source as MapNode;
           if (source && FIELDS[source.kind]) openEditor(source);
         }}
       >
-        <Background gap={18} color="#e2e8f0" />
+        <Background gap={18} color="#e6e2da" />
         <Controls />
         <MiniMap pannable zoomable />
       </ReactFlow>
-      {hover && (
-        <aside className="absolute z-10 right-4 top-16 w-80 panel p-4 text-sm shadow-lg space-y-2">
+      {hover && hoverAt && (
+        <aside className="absolute z-10 w-80 max-h-[70%] overflow-auto panel p-4 text-sm shadow-lg space-y-2 pointer-events-none" style={{ left: hoverAt.x, top: hoverAt.y }}>
           <div className="text-xs uppercase tracking-wide text-slate-500">{NAMES[hover.kind] || hover.kind}</div>
           <div className="font-semibold">{titleFor(hover)}</div>
           {detail.clause_text ? <p className="text-slate-600 whitespace-pre-wrap max-h-32 overflow-auto">{String(detail.clause_text)}</p> : null}

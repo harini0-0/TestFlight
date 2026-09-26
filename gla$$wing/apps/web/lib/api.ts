@@ -12,6 +12,10 @@ const warnings: Record<string, string> = {
   "human review can be required only on a warned clause": "A person can be required only on a warned clause.",
   "this stream belongs to the Meridian Components workspace": "This stream belongs to the Meridian Components workspace.",
   "approve the engine before playing the live stream": "Approve the engine before playing the live stream.",
+  "the language model is not configured": "Set the model key and base URL before checking an unstructured invoice.",
+  "GLASSWING_LLM_BASE_URL is not set": "Set the model base URL before checking an unstructured invoice.",
+  "the model rejected the API key": "The model rejected the API key.",
+  "no text could be read from the invoice": "No text could be read from that invoice.",
 };
 
 export function plainError(raw: string, fallback: string): string {

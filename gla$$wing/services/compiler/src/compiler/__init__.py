@@ -33,10 +33,21 @@ def compile_document(
     high_value_threshold: Decimal,
     model,
 ) -> tuple[list[Clause], list[RuleIR], list[list[float]]]:
-    """model.route(clause) -> bool, model.compile_rule(clause) -> RuleIR | None."""
+    """A live model exposes compile_pack(text). RecordingModel still routes clause by clause."""
+    compile_pack = getattr(model, "compile_pack", None)
+    if callable(compile_pack):
+        clauses, raw_rules = compile_pack(text)
+        by_id = {clause.clause_id: clause for clause in clauses}
+        rules: list[RuleIR] = []
+        for rule in raw_rules:
+            rule = rule.model_copy(update={"supplier_key": supplier_key})
+            clause = by_id.get(rule.source_clause_ids[0])
+            rules.append(score_rule(rule, clause.text if clause else (rule.clause_text or ""), high_value_threshold))
+        embeddings = [hash_embed(clause.text) for clause in clauses] or [hash_embed(text)]
+        return clauses, rules, embeddings
     clauses = segment_clauses(text)
     embeddings = [hash_embed(clause.text) for clause in clauses]
-    rules: list[RuleIR] = []
+    rules = []
     for clause in clauses:
         if is_boilerplate(clause):
             clause.commercial = False

@@ -15,9 +15,10 @@ const links = [
 
 export function Shell({ children }: { children: React.ReactNode }) {
   const path = usePathname();
+  const locked = path === "/" || path.startsWith("/work");
   return (
-    <div className="min-h-screen grid grid-cols-[240px_1fr] bg-paper text-ink">
-      <aside className="bg-ink text-white px-5 py-6 flex flex-col gap-8">
+    <div className="h-screen overflow-hidden grid grid-cols-[220px_1fr] bg-paper text-ink">
+      <aside className="h-full bg-[#1c1917] text-white px-5 py-6 flex flex-col gap-8">
         <div>
           <div className="text-[15px] font-semibold leading-5">AI procurement control</div>
           <div className="text-xs text-slate-400 mt-1">Contract rules, enforced live</div>
@@ -39,7 +40,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           Procurement manager
         </button>
       </aside>
-      <main className="min-w-0 p-8">{children}</main>
+      <main className={locked ? "min-w-0 h-full overflow-hidden p-5" : "min-w-0 h-full overflow-auto p-5"}>{children}</main>
       <Toaster />
     </div>
   );
