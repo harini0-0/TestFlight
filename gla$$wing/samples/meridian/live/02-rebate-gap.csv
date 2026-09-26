@@ -1,0 +1,2 @@
+transaction_id,supplier_key,invoice_number,invoice_date,quantity,unit_price,extended_amount,sku,description,category,rebate_amount
+MER-10488,meridian-components,MER-10488,2026-03-18,1,84000,84000,PROGRAM-SPEND,April components release with no rebate,goods,0

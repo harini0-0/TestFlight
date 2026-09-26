@@ -1,0 +1,2 @@
+transaction_id,supplier_key,invoice_number,invoice_date,quantity,unit_price,extended_amount,sku,description,category,rebate_amount
+MER-10440,meridian-components,MER-10440,2026-03-02,1,2100000,2100000,PROGRAM-SPEND,Opening eligible goods through March,goods,63000

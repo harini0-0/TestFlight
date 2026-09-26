@@ -1,0 +1,2 @@
+transaction_id,supplier_key,invoice_number,invoice_date,quantity,unit_price,extended_amount,sku,description,category,rebate_amount
+MER-10520,meridian-components,MER-10520,2026-03-22,20,18.50,370,Bracket A,Bracket A at the contracted unit price,goods,11.10

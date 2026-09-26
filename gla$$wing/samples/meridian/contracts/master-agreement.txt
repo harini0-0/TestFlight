@@ -1,0 +1,49 @@
+Supplier: Meridian Components
+
+Master Supply Agreement
+Buyer: Northline Industrial
+Effective date: 2026-01-01
+Contract year: anniversary of the effective date
+Currency: USD
+
+1. Appointment
+Meridian Components supplies machined parts, seals, sensors, and small motors to Northline plants in Ohio and Ontario. This agreement covers goods only. Freight and tax are outside the rebate base.
+
+2. Ordering
+Buyer releases purchases by written schedule. Each release states the part, quantity, and requested week. Meridian confirms within two business days.
+
+3. Efforts during shortage
+Meridian shall use commercially reasonable efforts to prioritize Northline during an allocation or shortage of raw material.
+
+4. Price schedule
+Unit prices are stated in the attached price schedule. A shipment above the stated unit price is a leak against that part.
+
+5. Quality
+Parts must meet the drawing revision on the release. Buyer may reject a lot that fails incoming inspection and return it at Meridian's cost.
+
+6. Tooling
+Buyer-owned tools stay at Meridian. Meridian shall not use those tools for another customer without written consent.
+
+7. Forecast
+Buyer provides a rolling six-month forecast. The first eight weeks are firm. Later weeks are for capacity planning.
+
+8. Packaging
+Each carton shows the part number, lot, and quantity. Mixed lots in one carton are not accepted.
+
+9. Liability
+Meridian's liability for a defective part is limited to repair, replacement, or a credit for the purchase price of that part. This liability clause does not cap a recall caused by Meridian's process.
+
+10. Termination
+Either party may terminate for a material breach that is not cured within thirty days after written notice. Termination does not erase rebates already earned.
+
+11. Records
+Meridian keeps shipment and price records for four years. Buyer may review those records once each contract year.
+
+12. Insurance
+Meridian maintains general liability coverage of not less than $5,000,000 and names Buyer as an additional insured.
+
+13. Confidentiality
+Drawings and pricing are confidential. Neither party publishes the other's prices.
+
+14. Assignment
+Meridian may not assign this agreement without Buyer's consent, except to a successor of the whole business.

@@ -1,0 +1,14 @@
+MASTER SUPPLY AGREEMENT
+Supplier: Acme
+
+8.2 Rebate
+Supplier will provide a 5% rebate on annual purchases exceeding $2 million, calculated on aggregate eligible purchases during the contract year.
+
+8.3 Price
+Widget A unit price is $10.00.
+
+9.1 Efforts
+Supplier will use commercially reasonable efforts to prioritize the buyer's orders during a shortage.
+
+12. Governing Law
+This agreement is governed by the laws of Delaware.

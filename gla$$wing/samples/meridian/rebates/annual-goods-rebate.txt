@@ -1,0 +1,7 @@
+Supplier: Meridian Components
+
+Annual goods rebate
+Eligible spend is the extended price of goods. Freight and tax do not count.
+
+1. Contract-year rebate
+The buyer receives a 3% rebate on eligible goods purchases exceeding $500,000 in the contract year. Once that line is crossed, each later invoice accrues the rebate on that invoice's eligible amount.

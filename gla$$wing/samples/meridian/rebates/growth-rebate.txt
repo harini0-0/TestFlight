@@ -1,0 +1,7 @@
+Supplier: Meridian Components
+
+Growth rebate
+This schedule sits on top of the annual goods rebate and uses the same eligible base.
+
+1. Growth tier
+The buyer receives a 1.5% rebate on eligible goods purchases exceeding $8,000,000 in the contract year. The growth rebate is dormant until that higher line is crossed.

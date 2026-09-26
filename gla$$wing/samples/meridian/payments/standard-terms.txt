@@ -1,0 +1,6 @@
+Supplier: Meridian Components
+
+Standard settlement.
+
+1. Early pay
+Invoices carry 2% 10 days net 45. The discount is due when Buyer pays inside the ten-day window.
