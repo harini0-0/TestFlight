@@ -12,6 +12,7 @@ from actions.machine import approve as approve_action
 from actions.machine import execute as execute_action
 from actions.machine import propose as propose_action
 from audit.chain import AuditLog
+from compiler.llm_compile import CompilerFailure, LlmCompiler
 from compiler.pipeline import compiler_prompt_hash, score_rule
 from compiler.recording_model import RecordingModel
 from compiler.testgen import template_cases
@@ -32,14 +33,16 @@ from glasswing_adapters.db import (
     SettingRow,
     TransactionRow,
 )
+from glasswing_adapters.llm import LlmError, chat_client_from_env, llm_enabled
 from glasswing_adapters.runtime import hash_api_key
 from glasswing_domain.events import AuditEvent
 from glasswing_domain.ids import uuid7
 from glasswing_domain.money import Money
 from glasswing_domain.ontology import Clause
 from glasswing_domain.periods import period_key
-from glasswing_domain.rules import RuleIR
+from glasswing_domain.rules import RuleIR, engine_triggers
 from glasswing_domain.transactions import ClockTick, Invoice, PerformanceEvent, SpendEvent
+from ingestion.normalize import NormalizeFailure, normalize_unstructured
 from investigator.service import investigate_exception, judge_natural_language, search_clauses
 from pydantic import TypeAdapter
 from sqlalchemy import select
@@ -231,9 +234,14 @@ class Platform:
 
     def compile(self, tenant_id: str, document_id: str, actor: str) -> BundleRow:
         document = self._document(tenant_id, document_id)
-        model = RecordingModel(document.supplier_key, SONNET)
+        model = self._model_for_compile(document.supplier_key)
         threshold = Decimal(self.settings(tenant_id).high_value_threshold)
-        clauses, rules, embeddings = compile_document(document.body, document.supplier_key, threshold, model)
+        try:
+            clauses, rules, embeddings = compile_document(document.body, document.supplier_key, threshold, model)
+        except CompilerFailure as exc:
+            document.status = "compiler_failed"
+            self._audit(tenant_id, actor, "bundle.compile_failed", [document_id], {"detail": exc.detail})
+            raise PlatformError(422, exc.detail) from exc
         version = self._next_version(tenant_id, document_id)
         bundle = BundleRow(
             id=uuid7(),
@@ -245,7 +253,7 @@ class Platform:
             supplier_key=document.supplier_key,
             document_hash=document.sha256,
             prompt_hash=compiler_prompt_hash(),
-            model_id=SONNET,
+            model_id=model.model_id,
             test_run_id="",
             rules_json=_dump([rule.model_dump(mode="json") for rule in rules]),
             clauses_json=_dump([clause.model_dump(mode="json") for clause in clauses]),
@@ -451,6 +459,35 @@ class Platform:
             IdempotencyRow(key=f"{tenant_id}:{idempotency_key}", tenant_id=tenant_id, response_json=_dump(response))
         )
         return response
+
+    def interpret_unstructured(self, tenant_id: str, text: str, supplier_key: str | None) -> dict:
+        if not llm_enabled():
+            raise PlatformError(503, "the language model is not configured")
+        try:
+            client = chat_client_from_env()
+            events = normalize_unstructured(text, client.complete, supplier_key)
+        except LlmError as exc:
+            raise PlatformError(503, exc.detail) from exc
+        except NormalizeFailure as exc:
+            raise PlatformError(422, exc.detail) from exc
+        self._audit(
+            tenant_id,
+            "system",
+            "invoice.interpreted",
+            [event.transaction_id for event in events],
+            {"count": len(events)},
+        )
+        results = [self.accept_event(tenant_id, event, f"llm-{event.transaction_id}") for event in events]
+        return {"accepted": len(results), "results": results}
+
+    def _model_for_compile(self, supplier_key: str) -> RecordingModel | LlmCompiler:
+        if not llm_enabled():
+            return RecordingModel(supplier_key, SONNET)
+        try:
+            client = chat_client_from_env()
+        except LlmError as exc:
+            raise PlatformError(503, exc.detail) from exc
+        return LlmCompiler(supplier_key, client.complete, client.model_id)
 
     def confirm_finding(self, tenant_id: str, finding_id: str, actor: str, accept: bool) -> FindingRow:
         row = self._finding(tenant_id, finding_id)
@@ -945,7 +982,18 @@ class Platform:
         return 1 if latest is None else latest.version + 1
 
     def _rules(self, bundle: BundleRow) -> list[RuleIR]:
-        return [RuleIR.model_validate(item) for item in json.loads(bundle.rules_json)]
+        rules: list[RuleIR] = []
+        changed = False
+        for item in json.loads(bundle.rules_json):
+            rule = RuleIR.model_validate(item)
+            trigger = engine_triggers(rule.rule_type, list(rule.trigger))
+            if list(rule.trigger) != trigger:
+                rule = rule.model_copy(update={"trigger": trigger})
+                changed = True
+            rules.append(rule)
+        if changed:
+            bundle.rules_json = _dump([rule.model_dump(mode="json") for rule in rules])
+        return rules
 
     def _clauses(self, bundle: BundleRow) -> list[Clause]:
         return [Clause.model_validate(item) for item in json.loads(bundle.clauses_json)]

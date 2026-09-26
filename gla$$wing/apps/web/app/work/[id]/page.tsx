@@ -39,6 +39,27 @@ const zones = [
 
 type Step = (typeof steps)[number][0];
 
+function processTone(kind: "current" | "done" | "waiting") {
+  if (kind === "current") return "panel p-3 space-y-2 ring-2 ring-accent min-w-0";
+  return "panel p-3 space-y-2 min-w-0";
+}
+
+function processingCopy(busy: string): { title: string; detail: string } | null {
+  if (busy === "Compiling the engine") {
+    return { title: "AI is reading the documents", detail: "The uploaded files are being turned into one rule engine." };
+  }
+  if (busy === "Running practice checks") {
+    return { title: "Running the practice checks", detail: "Each rule is being tested before you review the engine." };
+  }
+  if (busy === "Confirming rebate") {
+    return { title: "Saving the rebate confirmation", detail: "The engine will use this application on the next practice run." };
+  }
+  if (busy === "Checking the invoice") {
+    return { title: "AI is reading this invoice", detail: "The invoice is being structured, then checked against the rules." };
+  }
+  return null;
+}
+
 export default function WorkPage() {
   const params = useParams<{ id: string }>();
   const [pack, setPack] = useState<Pack | null>(null);
@@ -48,9 +69,18 @@ export default function WorkPage() {
   const [message, setMessage] = useState("");
   const [report, setReport] = useState<Array<{ passed: boolean; author: string; expected_outcome: string; actual_outcome: string; detail?: string }>>([]);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [invoice, setInvoice] = useState({ number: "", date: "2026-03-01", amount: "1000", description: "Goods" });
+  const [invoiceText, setInvoiceText] = useState("");
+  const [invoiceFile, setInvoiceFile] = useState<File | null>(null);
   const [stream, setStream] = useState<Array<{ filename: string; summary: string }>>([]);
   const [playing, setPlaying] = useState(false);
+  const [busy, setBusy] = useState("");
+  const [awaitingRetest, setAwaitingRetest] = useState(false);
+  const [showFiles, setShowFiles] = useState(false);
+  const [showPeriod, setShowPeriod] = useState(false);
+  const [approveOpen, setApproveOpen] = useState(false);
+  const [acks, setAcks] = useState([false, false, false]);
+  const [showFlow, setShowFlow] = useState(false);
+  const [spotlight, setSpotlight] = useState<string[]>([]);
 
   async function load() {
     const body = await api<Pack>(`/v1/packs/${params.id}`);
@@ -83,6 +113,7 @@ export default function WorkPage() {
 
   async function playStream() {
     setPlaying(true);
+    setShowFlow(true);
     try {
       for (;;) {
         const step = await api<{
@@ -129,200 +160,392 @@ export default function WorkPage() {
     await load();
   }
 
-  if (!pack) return <p className="text-sm text-slate-600">{message || "Opening workspace."}</p>;
+  async function checkInvoice() {
+    if (!pack) return;
+    const supplierKey = pack.supplier_key;
+    const file = invoiceFile;
+    const text = invoiceText.trim();
+    if (!file && !text) return;
+    setBusy("Checking the invoice");
+    try {
+      let posted: { accepted: number; results: Array<{ transaction_id: string; evaluations: Array<{ outcome: string; explanation: string }> }> };
+      if (file) {
+        const response = await fetch(`${API_URL}/v1/transactions/interpret`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token()}`,
+            "X-Filename": file.name,
+            "X-Supplier-Key": supplierKey,
+            "Content-Type": file.type || "application/octet-stream",
+          },
+          body: await file.arrayBuffer(),
+        });
+        if (!response.ok) fail(await response.text(), "Could not read that invoice");
+        posted = await response.json();
+      } else {
+        posted = await api("/v1/transactions/interpret", {
+          method: "POST",
+          body: JSON.stringify({ text, supplier_key: supplierKey }),
+        });
+      }
+      const leaks = posted.results.flatMap((row) =>
+        row.evaluations.filter((item) => item.outcome === "violation").map((item) => `${row.transaction_id}: ${item.explanation}`),
+      );
+      setMessage(
+        leaks.length
+          ? leaks.join(" ")
+          : `Checked ${posted.accepted} transaction${posted.accepted === 1 ? "" : "s"}. No leaks.`,
+      );
+      setInvoiceFile(null);
+      setSpotlight(
+        posted.results
+          .filter((row) => row.evaluations.some((item) => item.outcome === "violation"))
+          .map((row) => row.transaction_id),
+      );
+      setShowFlow(true);
+      setRefreshKey((value) => value + 1);
+    } catch {
+      setMessage("");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  if (!pack) {
+    return (
+      <p className="text-sm text-stone-600 flex items-center gap-2">
+        <span className="spinner" />
+        {message || "Opening workspace"}
+      </p>
+    );
+  }
 
   const rules = pack.bundle?.rules || [];
+  const openRebates = rules.filter((rule) => rule.needs_confirmation.includes("application"));
+  const confirmedRebates = rules.filter((rule) => Boolean(rule.obligation?.application) && !rule.needs_confirmation.includes("application"));
+  const retestOnly = Boolean(pack.bundle) && openRebates.length === 0 && awaitingRetest;
+  const processStage: 1 | 2 | 3 = !pack.bundle ? 1 : openRebates.length ? 2 : awaitingRetest ? 1 : 3;
+  const stageTone = (panel: 1 | 2 | 3): "current" | "done" | "waiting" => {
+    if (panel === processStage) return "current";
+    if (panel === 1 && pack.bundle) return "done";
+    if (panel === 2 && pack.bundle && openRebates.length === 0) return "done";
+    return "waiting";
+  };
+
+  const processing = (step === "process" || step === "live") ? processingCopy(busy) : null;
 
   return (
-    <div className="space-y-6">
-      <header className="flex items-end justify-between gap-6">
+    <>
+    <div className="flex h-full min-h-0 flex-col gap-3" inert={processing ? true : undefined}>
+      <header className="flex items-end justify-between gap-6 shrink-0">
         <div>
-          <div className="text-xs uppercase tracking-wide text-slate-500">Supplier workspace</div>
+          <div className="text-xs uppercase tracking-wide text-stone-500">Supplier workspace</div>
           <h1 className="text-2xl font-semibold tracking-tight mt-1">{pack.supplier_key}</h1>
         </div>
-          <div className="text-sm text-slate-500">{live ? "Live engine running" : pack.bundle ? `Engine v${pack.bundle.version} · ${pack.bundle.status}` : "Not processed"}{live && pack.bundle && !pack.bundle.active ? ` · draft v${pack.bundle.version} waiting` : ""}</div>
+        <div className="text-sm text-stone-500">{live ? "Live engine running" : pack.bundle ? `Engine v${pack.bundle.version} · ${pack.bundle.status}` : "Not processed"}{live && pack.bundle && !pack.bundle.active ? ` · draft v${pack.bundle.version} waiting` : ""}</div>
       </header>
-      <div className="grid grid-cols-4 gap-2">
+      <div className="grid grid-cols-4 gap-2 shrink-0">
         {steps.map(([id, label]) => (
           <button key={id} className={step === id ? "btn btn-primary" : "btn"} onClick={() => setStep(id)}>{label}</button>
         ))}
       </div>
-      {message && <p className="text-sm text-slate-700">{message}</p>}
+      {message && <p className="text-sm text-stone-700 shrink-0">{message}</p>}
 
       {step === "upload" && (
-        <section className="space-y-4">
-          <p className="text-sm text-slate-600">Add every commercial file for this supplier. You can drop more than one file in each group.</p>
-          <div className="grid md:grid-cols-3 gap-3">
+        <section key="upload" className="step-pane flex-1 min-h-0 flex flex-col gap-3">
+          <p className="text-sm text-stone-600 shrink-0">Add every commercial file for this supplier. You can drop more than one file in each group.</p>
+          <div className="grid grid-cols-3 grid-rows-2 gap-3 flex-1 min-h-0">
             {zones.map(([kind, label]) => (
-              <label key={kind} className="panel p-4 block cursor-pointer" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); upload(kind, event.dataTransfer.files).catch(() => undefined); }}>
+              <label key={kind} className="panel p-3 block cursor-pointer min-h-0 overflow-auto" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); upload(kind, event.dataTransfer.files).catch(() => undefined); }}>
                 <div className="font-medium">{label}</div>
-                <div className="text-xs text-slate-500 mt-1">TXT, CSV, or PDF</div>
-                <input className="mt-3 block w-full text-sm" type="file" accept=".txt,.csv,.pdf,text/plain,application/pdf" multiple onChange={(event) => { if (event.target.files) upload(kind, event.target.files).catch(() => undefined); }} />
-                <ul className="mt-3 text-xs text-slate-600 space-y-1">
+                <div className="text-xs text-stone-500 mt-1">TXT, CSV, or PDF</div>
+                <input className="mt-2 block w-full text-sm" type="file" accept=".txt,.csv,.pdf,text/plain,application/pdf" multiple onChange={(event) => { if (event.target.files) upload(kind, event.target.files).catch(() => undefined); }} />
+                <ul className="mt-2 text-xs text-stone-600 space-y-1">
                   {pack.files.filter((file) => file.kind === kind).map((file) => <li key={file.document_id}>{file.filename}</li>)}
                 </ul>
               </label>
             ))}
           </div>
-          <button className="btn btn-primary" disabled={!ready} onClick={() => setStep("process")}>Continue to process</button>
+          <button className="btn btn-primary shrink-0 self-start" disabled={!ready} onClick={() => setStep("process")}>Continue to process</button>
         </section>
       )}
 
       {step === "process" && (
-        <section className="space-y-4 max-w-3xl">
-          <p className="text-sm text-slate-600">{pack.files.length} file{pack.files.length === 1 ? "" : "s"} ready. Processing compiles one rule engine and runs its tests. Approval is the single human gate.</p>
-          <div className="flex gap-3">
-            <button className="btn btn-primary" onClick={async () => {
-              const processed = await api<{ tests: { results: typeof report }; bundle_id: string }>(`/v1/packs/${params.id}/process`, { method: "POST" });
-              setReport(processed.tests.results || []);
-              setMessage("Processing finished. Review the tests, then approve the engine.");
-              await load();
-            }}>Process documents</button>
-            <button className="btn" disabled={!pack.bundle} onClick={async () => {
-              if (!pack.bundle) return;
-              try {
-                await api(`/v1/bundles/${pack.bundle.bundle_id}/approve`, { method: "POST", body: JSON.stringify({ human_switches: {} }) });
-                setMessage("Engine approved. Live transactions now use this version.");
-                await load();
-                setStep("engine");
-              } catch {
-                setMessage("");
-              }
-            }}>Approve engine</button>
-          </div>
-          {rules.some((rule) => rule.needs_confirmation.includes("application")) && (
-            <div className="panel p-4 space-y-2">
-              <div className="font-medium">Confirm rebate application</div>
-              {rules.filter((rule) => rule.needs_confirmation.includes("application")).map((rule) => (
-                <button key={rule.rule_id} className="btn" onClick={async () => {
-                  await api(`/v1/bundles/${pack.bundle?.bundle_id}/resolve`, { method: "POST", body: JSON.stringify({ rule_id: rule.rule_id, field: "application", value: "rate_on_each_invoice_once_crossed" }) });
-                  setMessage("Application confirmed. Process the tests again, then approve.");
+        <section key="process" className="step-pane flex-1 min-h-0 flex flex-col gap-3">
+          <p className="text-sm text-stone-600 shrink-0">This step turns the {pack.files.length} uploaded file{pack.files.length === 1 ? "" : "s"} into one rule engine, checks it with practice cases, and asks you to approve it once. Live invoices are not checked until you approve.</p>
+          <div className="grid grid-cols-3 gap-3 shrink-0">
+            <div className={processTone(stageTone(1))}>
+              <div className="text-sm font-semibold text-ink">1 · Compile and test {processStage > 1 ? "· Done" : ""}</div>
+              <p className="text-sm text-stone-700">{retestOnly ? "The rebate confirmations are saved. Run the practice checks on this engine. This does not read the documents again." : pack.bundle ? "Already compiled. Process the documents again only if the uploaded files changed." : "An AI reads the uploaded files, writes one rule engine, and runs the practice checks. Nothing is live yet."}</p>
+              <button className={processStage === 1 ? "btn btn-primary" : "btn"} disabled={Boolean(busy)} onClick={async () => {
+                if (retestOnly && pack.bundle) {
+                  setBusy("Running practice checks");
+                  try {
+                    const tested = await api<{ results: typeof report }>(`/v1/bundles/${pack.bundle.bundle_id}/tests`, { method: "POST" });
+                    setReport(tested.results || []);
+                    setAwaitingRetest(false);
+                    setMessage("Practice checks finished. Review the engine.");
+                    await load();
+                  } catch {
+                    setMessage("");
+                  } finally {
+                    setBusy("");
+                  }
+                  return;
+                }
+                setBusy("Compiling the engine");
+                try {
+                  const processed = await api<{ tests: { results: typeof report }; bundle_id: string }>(`/v1/packs/${params.id}/process`, { method: "POST" });
+                  setReport(processed.tests.results || []);
+                  setAwaitingRetest(false);
+                  setMessage("Processing finished. Review the tests, then view the engine.");
                   await load();
-                }}>Use the rate on each invoice after the threshold · clause {rule.source_clause_ids[0]}</button>
-              ))}
+                } catch {
+                  setMessage("");
+                } finally {
+                  setBusy("");
+                }
+              }}>{busy === "Compiling the engine" ? "Compiling the engine" : busy === "Running practice checks" ? "Running practice checks" : retestOnly ? "Run practice checks" : "Process documents"}</button>
             </div>
-          )}
+            <div className={processTone(stageTone(2))}>
+              <div className="text-sm font-semibold text-ink">2 · Confirm how each rebate applies</div>
+              {openRebates.length > 0 || confirmedRebates.length > 0 ? (
+                <>
+                  <p className="text-sm text-stone-700">The clause names a rate and a spend line, but not whether that rate is taken on each invoice after the line is crossed. Tick each box to confirm that. Then run the practice checks again.</p>
+                  {openRebates.map((rule) => (
+                    <label key={rule.rule_id} className="flex items-start gap-2 text-sm font-medium text-ink">
+                      <input
+                        type="checkbox"
+                        className="mt-1"
+                        disabled={Boolean(busy)}
+                        onChange={async (event) => {
+                          if (!event.target.checked) return;
+                          setBusy("Confirming rebate");
+                          try {
+                            await api(`/v1/bundles/${pack.bundle?.bundle_id}/resolve`, { method: "POST", body: JSON.stringify({ rule_id: rule.rule_id, field: "application", value: "rate_on_each_invoice_once_crossed" }) });
+                            setAwaitingRetest(true);
+                            setMessage("Application confirmed. Process the tests again, then view the engine.");
+                            await load();
+                          } catch {
+                            event.target.checked = false;
+                            setMessage("");
+                          } finally {
+                            setBusy("");
+                          }
+                        }}
+                      />
+                      <span>Use the rate on each invoice after the threshold · clause {rule.source_clause_ids[0]}</span>
+                    </label>
+                  ))}
+                  {confirmedRebates.map((rule) => (
+                    <label key={rule.rule_id} className="flex items-start gap-2 text-sm font-medium text-ink">
+                      <input type="checkbox" className="mt-1" checked disabled />
+                      <span>Use the rate on each invoice after the threshold · clause {rule.source_clause_ids[0]}</span>
+                    </label>
+                  ))}
+                </>
+              ) : (
+                <p className="text-sm text-stone-700">Not needed. No clause leaves the rebate application open.</p>
+              )}
+            </div>
+            <div className={processTone(stageTone(3))}>
+              <div className="text-sm font-semibold text-ink">3 · Review the engine {live && pack.bundle?.active ? "· Live" : ""}</div>
+              <p className="text-sm text-stone-700">Open the graph and check that each clause, rule, and finding is in place. Approval happens there, after you confirm you have read the rules.</p>
+              {!pack.bundle && <p className="text-sm text-ink">Process the documents first.</p>}
+              {openRebates.length > 0 && <p className="text-sm text-ink">Tick the open rebate boxes first.</p>}
+              {awaitingRetest && <p className="text-sm text-ink">Run the practice checks again, then view the engine.</p>}
+              <button className={processStage === 3 ? "btn btn-primary" : "btn"} disabled={!pack.bundle || openRebates.length > 0 || awaitingRetest || Boolean(busy)} onClick={() => setStep("engine")}>View engine</button>
+            </div>
+          </div>
           {report.length > 0 && (
-            <table className="w-full text-sm panel overflow-hidden">
-              <thead><tr className="text-left text-slate-500"><th className="p-3">Result</th><th>Author</th><th>Expected</th><th>Actual</th></tr></thead>
-              <tbody>
-                {report.map((row, index) => (
-                  <tr key={index} className="border-t border-line">
-                    <td className="p-3">{row.passed ? "Pass" : "Fail"}</td>
-                    <td>{row.author}</td>
-                    <td>{row.expected_outcome}</td>
-                    <td>{row.actual_outcome} {row.detail}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="flex-1 min-h-0 overflow-auto panel">
+              <p className="px-3 pt-3 text-xs text-stone-500">Result is pass or fail. Author is who wrote the check. Expected is the required outcome. Actual is what the engine did. A fail blocks approval.</p>
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-white"><tr className="text-left text-stone-500"><th className="p-3">Result</th><th>Author</th><th>Expected</th><th>Actual</th></tr></thead>
+                <tbody>
+                  {report.map((row, index) => (
+                    <tr key={index} className="border-t border-line">
+                      <td className="p-3">{row.passed ? "Pass" : "Fail"}</td>
+                      <td>{row.author}</td>
+                      <td>{row.expected_outcome}</td>
+                      <td>{row.actual_outcome} {row.detail}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </section>
       )}
 
       {step === "engine" && (
-        <section className="space-y-3">
-          <p className="text-sm text-slate-600">Hover a node for the clause, formula, and ledger. Click a rule to edit it. A live edit becomes the next draft and does not replace the running engine until you approve it.</p>
+        <section key="engine" className="step-pane flex-1 min-h-0 flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-3 shrink-0">
+            <p className="text-sm text-stone-700">Hover a node for the clause, formula, and ledger. Click a rule to edit it. A live edit becomes the next draft and does not replace the running engine until you approve it.</p>
+            <button
+              className="btn btn-primary shrink-0"
+              disabled={!pack.bundle || openRebates.length > 0 || Boolean(busy)}
+              onClick={() => {
+                setAcks([false, false, false]);
+                setApproveOpen(true);
+              }}
+            >
+              Approve rules engine
+            </button>
+          </div>
+          {!pack.bundle && <p className="text-sm text-ink shrink-0">Process the documents first.</p>}
+          {openRebates.length > 0 && <p className="text-sm text-ink shrink-0">Tick the open rebate boxes on Process before you approve.</p>}
           <RuleGraph documentId={params.id} refreshKey={refreshKey} />
         </section>
       )}
 
       {step === "live" && (
-        <section className="space-y-4">
-          <div className="panel p-4 space-y-3">
-            <h2 className="font-semibold">What this stream does</h2>
-            <p className="text-sm text-slate-600">Each file is posted in order against the engine that is already live. A dashed line then runs from the agreement through the clause and the rule to the result. A leak pulses red on the rule and on the finding. A pass stays still.</p>
+        <section key="live" className="step-pane flex-1 min-h-0 grid grid-cols-[360px_1fr] grid-rows-[minmax(0,1fr)] gap-3">
+          <div className="min-h-0 grid grid-rows-[auto_minmax(0,1fr)] gap-2">
+          <div className="panel p-3 flex flex-col gap-1.5">
+            <h2 className="font-semibold text-sm">What this stream does</h2>
+            <p className="text-xs text-stone-600">Each file is posted in order. A leak pulses red. A pass stays still.</p>
             {pack.supplier_key === "meridian-components" ? (
               <>
-                <ol className="space-y-2 text-sm">
-                  {stream.map((file) => (
-                    <li key={file.filename}>
-                      <div className="font-medium">{file.filename}</div>
-                      <div className="text-slate-600">{file.summary}</div>
-                    </li>
-                  ))}
-                </ol>
                 <button className="btn btn-primary" disabled={playing || !live} onClick={() => playStream()}>
+                  {playing && <span className="spinner" />}
                   {playing ? "Playing…" : "Play live stream"}
                 </button>
+                <button type="button" className="btn" onClick={() => setShowFiles(true)}>Show the files</button>
               </>
             ) : (
-              <p className="text-sm text-slate-600">This workspace uses the forms below. Load Meridian Components from the home page to play the prepared invoice stream.</p>
+              <p className="text-xs text-stone-600">This workspace uses the form below. Load Meridian Components from the home page to play the prepared invoice stream.</p>
             )}
           </div>
-          <div className="grid lg:grid-cols-2 gap-4">
-            <form className="panel p-4 space-y-3" onSubmit={async (event) => {
-              event.preventDefault();
-              const id = `INV-${invoice.number || crypto.randomUUID().slice(0, 8)}`;
-              await api("/v1/transactions", {
-                method: "POST",
-                headers: { "Idempotency-Key": id },
-                body: JSON.stringify({
-                  transaction_id: id,
-                  supplier_key: pack.supplier_key,
-                  invoice_number: invoice.number || id,
-                  invoice_date: invoice.date,
-                  currency: "USD",
-                  lines: [{
-                    description: invoice.description,
-                    category: "goods",
-                    quantity: "1",
-                    unit_price: { amount: invoice.amount, currency: "USD" },
-                    extended_amount: { amount: invoice.amount, currency: "USD" },
-                  }],
-                }),
-              });
-              setMessage(`Invoice ${id} checked against the live engine.`);
-              setRefreshKey((value) => value + 1);
-            }}>
-              <h2 className="font-semibold">Upload a live invoice</h2>
-              <input className="field" placeholder="Invoice number" value={invoice.number} onChange={(event) => setInvoice({ ...invoice, number: event.target.value })} />
-              <input className="field" type="date" value={invoice.date} onChange={(event) => setInvoice({ ...invoice, date: event.target.value })} />
-              <input className="field" placeholder="Amount" value={invoice.amount} onChange={(event) => setInvoice({ ...invoice, amount: event.target.value })} />
-              <input className="field" placeholder="Description" value={invoice.description} onChange={(event) => setInvoice({ ...invoice, description: event.target.value })} />
-              <button className="btn btn-primary" type="submit">Check invoice</button>
-            </form>
-            <div className="panel p-4 space-y-3">
-              <h2 className="font-semibold">Upload a CSV of invoices</h2>
-              <textarea id="csv" className="field h-28" defaultValue={"supplier_key,invoice_number,invoice_date,quantity,unit_price,description,category\n"} />
-              <button className="btn" onClick={async () => {
-                const raw = (document.getElementById("csv") as HTMLTextAreaElement).value.trim();
-                const lines = raw.split(/\r?\n/).filter((line) => line.trim());
-                const header = lines[0]?.split(",").map((cell) => cell.trim()) || [];
-                const supplierColumn = header.indexOf("supplier_key");
-                let rewritten = false;
-                const body = lines.map((line, index) => {
-                  if (index === 0 || supplierColumn < 0) return line;
-                  const cells = line.split(",");
-                  if ((cells[supplierColumn] || "").trim() !== pack.supplier_key) rewritten = true;
-                  cells[supplierColumn] = pack.supplier_key;
-                  return cells.join(",");
-                }).join("\n");
+          <div className="panel p-3 min-h-0 flex flex-col gap-1.5 overflow-hidden">
+            <h2 className="font-semibold text-sm shrink-0">Check invoices</h2>
+            <p className="text-xs text-stone-600 shrink-0">Paste an invoice, email, or spreadsheet, or drop the file. The model structures it, then the engine checks it.</p>
+            <div className="min-h-0 flex flex-col gap-1.5 flex-1 overflow-hidden">
+              <textarea
+                className="field field-compact min-h-0 flex-1"
+                placeholder="Paste the invoice as it arrived"
+                value={invoiceText}
+                onChange={(event) => setInvoiceText(event.target.value)}
+              />
+              <label
+                className="text-xs text-stone-600 shrink-0"
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const dropped = event.dataTransfer.files[0];
+                  if (dropped) setInvoiceFile(dropped);
+                }}
+              >
+                {invoiceFile ? invoiceFile.name : "Drop a PDF, text file, CSV, or email"}
+                <input
+                  className="mt-1 block w-full text-xs"
+                  type="file"
+                  accept=".txt,.csv,.pdf,.eml,text/plain,application/pdf,message/rfc822"
+                  onChange={(event) => setInvoiceFile(event.target.files?.[0] || null)}
+                />
+              </label>
+              <button className="btn btn-primary shrink-0" type="button" disabled={Boolean(busy) || (!invoiceText.trim() && !invoiceFile)} onClick={() => checkInvoice()}>
+                {busy === "Checking the invoice" ? "Checking the invoice" : "Check invoice"}
+              </button>
+              <button type="button" className="text-left text-xs font-medium text-accent shrink-0" onClick={() => setShowPeriod((open) => !open)}>{showPeriod ? "Hide document upload" : "Add a document during the period"}</button>
+              {showPeriod && (
+                <div className="min-h-0 overflow-auto space-y-1.5">
+              <input className="block w-full text-xs" type="file" accept=".txt,.csv,.pdf,text/plain,application/pdf" onChange={(event) => { if (event.target.files) upload("contract", event.target.files).then(() => setMessage("Document stored. Rebuild the draft when you want it in the engine.")).catch(() => undefined); }} />
+              <button className="btn" disabled={Boolean(busy)} onClick={async () => {
+                setBusy("Compiling the engine");
                 try {
-                  const posted = await api<{ results: Array<{ transaction_id: string; evaluations: Array<{ outcome: string; explanation: string }> }> }>("/v1/connectors/csv", { method: "POST", body: JSON.stringify({ csv: body }) });
-                  const leaks = posted.results.flatMap((row) => row.evaluations.filter((item) => item.outcome === "violation").map((item) => `${row.transaction_id}: ${item.explanation}`));
-                  setMessage(
-                    rewritten
-                      ? `Checked against ${pack.supplier_key}, not the supplier name in the file. ${leaks.length ? leaks.join(" ") : "No leaks."}`
-                      : leaks.length ? leaks.join(" ") : "CSV invoices checked. No leaks.",
-                  );
-                  setRefreshKey((value) => value + 1);
+                  await api(`/v1/packs/${params.id}/process`, { method: "POST" });
+                  setMessage("A new draft was compiled. The live engine keeps running until you approve the draft.");
+                  await load();
                 } catch {
                   setMessage("");
+                } finally {
+                  setBusy("");
                 }
-              }}>Upload CSV</button>
-              <h2 className="font-semibold pt-2">Add a document during the period</h2>
-              <input type="file" accept=".txt,.csv,.pdf,text/plain,application/pdf" onChange={(event) => { if (event.target.files) upload("contract", event.target.files).then(() => setMessage("Document stored. Rebuild the draft when you want it in the engine.")).catch(() => undefined); }} />
-              <button className="btn" onClick={async () => {
-                await api(`/v1/packs/${params.id}/process`, { method: "POST" });
-                setMessage("A new draft was compiled. The live engine keeps running until you approve the draft.");
-                await load();
               }}>Rebuild draft from documents</button>
+                </div>
+              )}
             </div>
           </div>
-          <RuleGraph documentId={params.id} refreshKey={refreshKey} live />
+          </div>
+          <RuleGraph documentId={params.id} refreshKey={refreshKey} live={showFlow} spotlight={spotlight} />
         </section>
       )}
+      {approveOpen && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-ink/40 p-6">
+          <form
+            className="panel w-full max-w-lg p-5 space-y-4"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              if (!pack.bundle || acks.some((ack) => !ack)) return;
+              setBusy("Approving the engine");
+              try {
+                await api(`/v1/bundles/${pack.bundle.bundle_id}/approve`, { method: "POST", body: JSON.stringify({ human_switches: {} }) });
+                setMessage("Engine approved. Live transactions now use this version.");
+                setApproveOpen(false);
+                await load();
+                setLive(true);
+                setStep("live");
+              } catch {
+                setMessage("");
+              } finally {
+                setBusy("");
+              }
+            }}
+          >
+            <h2 className="text-lg font-semibold">Approve the rules engine</h2>
+            <p className="text-sm text-stone-700">Tick each line. Approval stays closed until all three are checked.</p>
+            {["I have read the rules on this graph.", "I understand these rules were drafted by software from the uploaded documents, and a person must confirm them.", "I understand that after approval, live invoices are checked against this version."].map((line, index) => (
+              <label key={line} className="flex items-start gap-2 text-sm font-medium text-ink">
+                <input type="checkbox" className="mt-1" checked={acks[index]} onChange={(event) => setAcks(acks.map((ack, ackIndex) => ackIndex === index ? event.target.checked : ack))} />
+                <span>{line}</span>
+              </label>
+            ))}
+            <div className="flex justify-end gap-2">
+              <button type="button" className="btn" onClick={() => setApproveOpen(false)}>Cancel</button>
+              <button className="btn btn-primary" type="submit" disabled={acks.some((ack) => !ack) || Boolean(busy)}>
+                {busy === "Approving the engine" && <span className="spinner" />}
+                {busy === "Approving the engine" ? "Approving the engine" : "Approve"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+      {showFiles && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-ink/40 p-6">
+          <div className="panel w-full max-w-lg max-h-[70vh] overflow-auto p-5 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold">Stream files</h2>
+              <button type="button" className="btn" onClick={() => setShowFiles(false)}>Close</button>
+            </div>
+            <ol className="space-y-2 text-sm">
+              {stream.map((file) => (
+                <li key={file.filename}>
+                  <div className="font-medium">{file.filename}</div>
+                  <div className="text-stone-600">{file.summary}</div>
+                </li>
+              ))}
+            </ol>
+          </div>
+        </div>
+      )}
     </div>
+    {processing && (
+      <div className="ai-veil" role="alertdialog" aria-modal="true" aria-labelledby="ai-working-title">
+        <div className="ai-card">
+          <div className="ai-radar" aria-hidden="true">
+            <span className="ai-ring" />
+            <span className="ai-ring" />
+            <span className="ai-ring" />
+            <span className="ai-sweep" />
+            <span className="ai-core" />
+          </div>
+          <div className="ai-kicker">Processing</div>
+          <h2 id="ai-working-title" className="ai-title">{processing.title}</h2>
+          <p className="ai-detail">{processing.detail}</p>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

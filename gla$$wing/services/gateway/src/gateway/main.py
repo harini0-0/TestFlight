@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import date
 from pathlib import Path
@@ -10,6 +11,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from glasswing_adapters.db import session_factory
+from glasswing_adapters.llm import load_env_file
 from glasswing_adapters.relay import default_publisher, relay_unpublished
 from glasswing_adapters.runtime import (
     LocalBlobStore,
@@ -32,6 +34,7 @@ from gateway.ratelimit import build_limiter
 EventAdapter = TypeAdapter(Invoice | SpendEvent | PerformanceEvent | ClockTick)
 MAX_BYTES = 20 * 1024 * 1024
 
+load_env_file()
 configure_telemetry("glasswing-gateway")
 Path("var").mkdir(exist_ok=True)
 SessionLocal, _engine = session_factory(os.environ.get("DATABASE_URL", "sqlite:///var/glasswing.db"))
@@ -105,6 +108,13 @@ def platform_for(session: Session = Depends(db), principal: Principal = Depends(
 
 def _guard(error: PlatformError) -> None:
     raise HTTPException(status_code=error.status, detail=error.detail)
+
+
+def _or_store(error: PlatformError) -> JSONResponse:
+    """A 422 compiler failure is written on the document and must commit."""
+    if error.status != 422:
+        _guard(error)
+    return JSONResponse({"detail": error.detail}, status_code=422)
 
 
 @app.get("/health")
@@ -258,7 +268,7 @@ def process_pack(pack_id: str, principal: Principal = Depends(current_user), ses
     try:
         bundle, report = platform.process_pack(principal.tenant_id, pack_id, principal.sub)
     except PlatformError as exc:
-        _guard(exc)
+        return _or_store(exc)
     return {
         "bundle_id": bundle.id,
         "version": bundle.version,
@@ -343,7 +353,7 @@ def compile_contract(document_id: str, principal: Principal = Depends(current_us
     try:
         bundle = platform.compile(principal.tenant_id, document_id, principal.sub)
     except PlatformError as exc:
-        _guard(exc)
+        return _or_store(exc)
     langfuse_trace("compiler", bundle.prompt_hash, bundle.model_id, 1)
     return {"bundle_id": bundle.id, "version": bundle.version, "rules": [rule.model_dump(mode="json") for rule in platform._rules(bundle)]}
 
@@ -397,7 +407,7 @@ def edit_contract(document_id: str, body: dict, principal: Principal = Depends(c
     try:
         bundle = platform.edit_contract(principal.tenant_id, document_id, body.get("text"), principal.sub)
     except PlatformError as exc:
-        _guard(exc)
+        return _or_store(exc)
     return {"bundle_id": bundle.id, "version": bundle.version, "status": bundle.status, "active": bool(bundle.active)}
 
 
@@ -438,6 +448,41 @@ def replay_diff(document_id: str, bundle_id: str, principal: Principal = Depends
 def portfolio(principal: Principal = Depends(current_user), session: Session = Depends(db)) -> dict:
     require_role(principal, "procurement_manager", "ap_analyst", "auditor")
     return Platform(session).portfolio(principal.tenant_id)
+
+
+@app.post("/v1/transactions/interpret")
+async def interpret_transaction(
+    request: Request,
+    principal: Principal = Depends(current_user),
+    session: Session = Depends(db),
+) -> dict:
+    require_role(principal, "connector", "procurement_manager", "ap_analyst")
+    raw = await request.body()
+    if len(raw) > MAX_BYTES:
+        raise HTTPException(status_code=413, detail="document exceeds 20MB")
+    supplier = request.headers.get("x-supplier-key")
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="invalid json") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="expected an object")
+        reject_client_tenant(principal, body)
+        text = str(body.get("text") or "")
+        supplier = str(body.get("supplier_key") or supplier or "")
+    else:
+        filename = request.headers.get("x-filename", "invoice.txt")
+        text = LocalPdfParser().extract_text(raw, filename)
+    if not text.strip():
+        raise HTTPException(status_code=422, detail="no text could be read from the invoice")
+    platform = Platform(session)
+    try:
+        return platform.interpret_unstructured(principal.tenant_id, text, supplier or None)
+    except PlatformError as exc:
+        _guard(exc)
+        return {}
 
 
 @app.post("/v1/transactions")
