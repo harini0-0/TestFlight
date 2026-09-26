@@ -1,6 +1,0 @@
-Supplier: Meridian Components
-
-Project releases use a longer window.
-
-1. Project early pay
-Project invoices carry 1% 15 days net 60. A payment inside fifteen days that omits the discount is a leak.

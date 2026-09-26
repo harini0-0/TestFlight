@@ -1,6 +1,0 @@
-Supplier: Meridian Components
-
-Service level for standard lanes.
-
-1. On-time delivery
-The service level delivery rate is 98%. A penalty of 5% of period spend applies when the delivery rate for the quarter is missed. Period spend is the goods shipped in that quarter.

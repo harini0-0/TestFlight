@@ -1,6 +1,0 @@
-Supplier: Meridian Components
-
-Option year.
-
-1. Option expiry
-Buyer must give 30 days notice before expiry on 2028-01-15. The option year does not open its notice window until thirty days before that date.

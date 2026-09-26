@@ -1,7 +1,0 @@
-Supplier: Meridian Components
-
-1. Housing tiers
-Volume discount for Housing C, list price is $40.00.
-8% discount at 100 units.
-12% discount at 500 units.
-The invoice unit price must reflect the tier. A full list price on a tier quantity is a leak.

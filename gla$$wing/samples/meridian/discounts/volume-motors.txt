@@ -1,7 +1,0 @@
-Supplier: Meridian Components
-
-1. Motor tiers
-Volume discount for Motor H, list price is $240.00.
-5% discount at 20 units.
-10% discount at 50 units.
-Buyer is not asked to claim the tier after the invoice is posted.

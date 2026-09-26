@@ -1,6 +1,0 @@
-Supplier: Meridian Components
-
-Primary term renewal.
-
-1. Primary expiry
-Buyer must give 90 days notice before expiry on 2027-06-30. If the notice window is open and no notice is on file, the renewal is missed.
