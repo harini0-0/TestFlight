@@ -1,0 +1,6 @@
+Supplier: Meridian Components
+
+Service level for expedite lanes that Buyer marks as hot.
+
+1. Expedite delivery
+The service level delivery rate is 99.5%. A penalty of 8% of period spend applies when the expedite delivery rate is missed.

@@ -1,0 +1,21 @@
+{
+  "event_type": "invoice.posted",
+  "transaction_id": "MER-10540",
+  "supplier_key": "meridian-components",
+  "invoice_number": "MER-10540",
+  "currency": "USD",
+  "invoice_date": "2026-04-01",
+  "paid_date": "2026-04-06",
+  "discount_taken": { "amount": "0", "currency": "USD" },
+  "lines": [
+    {
+      "sku": "Bracket A",
+      "description": "Bracket A paid inside the early-payment window",
+      "category": "goods",
+      "quantity": "100",
+      "unit_price": { "amount": "18.50", "currency": "USD" },
+      "extended_amount": { "amount": "1850", "currency": "USD" },
+      "rebate_amount": { "amount": "55.50", "currency": "USD" }
+    }
+  ]
+}

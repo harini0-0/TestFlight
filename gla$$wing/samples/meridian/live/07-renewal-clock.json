@@ -1,0 +1,7 @@
+{
+  "event_type": "clock.tick",
+  "transaction_id": "MER-CLOCK-2027-05",
+  "supplier_key": "meridian-components",
+  "as_of": "2027-05-01",
+  "notice_recorded": false
+}

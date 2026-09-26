@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: glasswing
+      POSTGRES_PASSWORD: glasswing
+      POSTGRES_DB: glasswing
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/001_schemas.sql:/docker-entrypoint-initdb.d/001_schemas.sql
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+  localstack:
+    image: localstack/localstack:3
+    environment:
+      SERVICES: s3,sqs,events
+    ports:
+      - "4566:4566"
+  langfuse:
+    image: langfuse/langfuse:2
+    profiles: ["observability"]
+    environment:
+      DATABASE_URL: postgresql://glasswing:glasswing@postgres:5432/glasswing
+      NEXTAUTH_SECRET: dev-secret
+      SALT: dev-salt
+      NEXTAUTH_URL: http://localhost:3001
+    ports:
+      - "3001:3000"
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata:
