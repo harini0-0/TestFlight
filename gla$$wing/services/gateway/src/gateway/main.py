@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from glasswing_adapters.db import session_factory
 from glasswing_adapters.llm import load_env_file
 from glasswing_adapters.relay import default_publisher, relay_unpublished
@@ -115,6 +118,43 @@ def _or_store(error: PlatformError) -> JSONResponse:
     if error.status != 422:
         _guard(error)
     return JSONResponse({"detail": error.detail}, status_code=422)
+
+
+def _wants_progress(request: Request) -> bool:
+    return "application/x-ndjson" in request.headers.get("accept", "")
+
+
+def _progress_response(session: Session, work: Callable[[Callable[[dict], None]], dict]) -> StreamingResponse:
+    """Run the model work on this request and stream a line each time a part finishes."""
+    events: queue.Queue = queue.Queue()
+
+    def on_progress(event: dict) -> None:
+        events.put({"type": "progress", **event})
+
+    def run() -> None:
+        try:
+            body = work(on_progress)
+            events.put({"type": "result", "body": body})
+        except PlatformError as exc:
+            if exc.status != 422:
+                session.rollback()
+            events.put({"type": "error", "detail": exc.detail})
+        except Exception:
+            session.rollback()
+            events.put({"type": "error", "detail": "processing failed"})
+        finally:
+            events.put(None)
+
+    threading.Thread(target=run, daemon=True).start()
+
+    def generate():
+        while True:
+            item = events.get()
+            if item is None:
+                break
+            yield json.dumps(item) + "\n"
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
 @app.get("/health")
@@ -238,7 +278,7 @@ async def upload_pack_file(
     if len(raw) > MAX_BYTES:
         raise HTTPException(status_code=413, detail="document exceeds 20MB")
     filename = request.headers.get("x-filename", "document.txt")
-    kind = request.headers.get("x-document-kind", "contract")
+    kind = request.headers.get("x-document-kind", "document")
     if not looks_like_document(raw, filename):
         raise HTTPException(status_code=415, detail="unsupported document")
     text = LocalPdfParser().extract_text(raw, filename).strip()
@@ -262,21 +302,27 @@ async def upload_pack_file(
 
 
 @app.post("/v1/packs/{pack_id}/process")
-def process_pack(pack_id: str, principal: Principal = Depends(current_user), session: Session = Depends(db)) -> dict:
+def process_pack(pack_id: str, request: Request, principal: Principal = Depends(current_user), session: Session = Depends(db)):
     require_role(principal, "procurement_manager")
     platform = Platform(session)
+
+    def payload(on_progress=None) -> dict:
+        bundle, report = platform.process_pack(principal.tenant_id, pack_id, principal.sub, on_progress=on_progress)
+        return {
+            "bundle_id": bundle.id,
+            "version": bundle.version,
+            "status": bundle.status,
+            "active": bool(bundle.active),
+            "rules": [rule.model_dump(mode="json") for rule in platform._rules(bundle)],
+            "tests": report,
+        }
+
+    if _wants_progress(request):
+        return _progress_response(session, payload)
     try:
-        bundle, report = platform.process_pack(principal.tenant_id, pack_id, principal.sub)
+        return payload()
     except PlatformError as exc:
         return _or_store(exc)
-    return {
-        "bundle_id": bundle.id,
-        "version": bundle.version,
-        "status": bundle.status,
-        "active": bool(bundle.active),
-        "rules": [rule.model_dump(mode="json") for rule in platform._rules(bundle)],
-        "tests": report,
-    }
 
 
 @app.post("/v1/contracts/{document_id}/rule-edit")
@@ -466,7 +512,7 @@ async def interpret_transaction(
     request: Request,
     principal: Principal = Depends(current_user),
     session: Session = Depends(db),
-) -> dict:
+):
     require_role(principal, "connector", "procurement_manager", "ap_analyst")
     raw = await request.body()
     if len(raw) > MAX_BYTES:
@@ -489,8 +535,14 @@ async def interpret_transaction(
     if not text.strip():
         raise HTTPException(status_code=422, detail="no text could be read from the invoice")
     platform = Platform(session)
+
+    def payload(on_progress=None) -> dict:
+        return platform.interpret_unstructured(principal.tenant_id, text, supplier or None, on_progress=on_progress)
+
+    if _wants_progress(request):
+        return _progress_response(session, payload)
     try:
-        return platform.interpret_unstructured(principal.tenant_id, text, supplier or None)
+        return payload()
     except PlatformError as exc:
         _guard(exc)
         return {}

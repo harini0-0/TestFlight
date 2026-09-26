@@ -68,13 +68,52 @@ def looks_like_document(payload: bytes, filename: str) -> bool:
         return True
     if payload.startswith(b"%PDF") or payload.startswith(b"PK"):
         return True
-    if name.endswith(".pdf") or name.endswith(".docx"):
+    if name.endswith(".pdf") or name.endswith(".docx") or name.endswith(".xlsx") or name.endswith(".xlsm"):
         return payload.startswith(b"%PDF") or payload.startswith(b"PK")
     return False
 
 
+def _is_xlsx(payload: bytes, filename: str) -> bool:
+    name = filename.lower()
+    return name.endswith((".xlsx", ".xlsm")) and payload.startswith(b"PK")
+
+
+def _cell_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).replace("\t", " ").replace("\n", " ").strip()
+
+
+def _xlsx_text(payload: bytes) -> str:
+    import io
+
+    from openpyxl import load_workbook
+
+    book = load_workbook(io.BytesIO(payload), read_only=True, data_only=True)
+    sections: list[str] = []
+    try:
+        for sheet in book.worksheets:
+            lines: list[str] = []
+            for row in sheet.iter_rows(values_only=True):
+                cells = [_cell_text(value) for value in row]
+                if any(cells):
+                    lines.append("\t".join(cells).rstrip())
+            if lines:
+                sections.append(f"Sheet: {sheet.title}\n" + "\n".join(lines))
+    finally:
+        book.close()
+    return "\n\n".join(sections)
+
+
 class LocalPdfParser:
     def extract_text(self, payload: bytes, filename: str) -> str:
+        if _is_xlsx(payload, filename):
+            try:
+                return _xlsx_text(payload)
+            except Exception:
+                return ""
         if payload.startswith(b"%PDF"):
             try:
                 import io
