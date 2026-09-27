@@ -90,7 +90,3 @@ DATABASE_URL=postgresql+psycopg://glasswing:glasswing@localhost:5432/glasswing m
 ```
 
 Leave `GLASSWING_ENV` unset on a demo machine. Setting it to `prod` hides the sample loaders.
-
-## Folder names that contain `$`
-
-Next.js rewrites `$$` inside a path. `apps/web/next.config.js` already keeps those paths intact, so a checkout whose folder name contains `$$` can still build.

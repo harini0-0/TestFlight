@@ -3,7 +3,7 @@ services:
   - type: web
     name: glasswing-api
     runtime: docker
-    rootDir: gla$$wing
+    rootDir: glasswing
     dockerfilePath: ./Dockerfile
     dockerContext: .
     plan: free
@@ -23,7 +23,7 @@ services:
   - type: web
     name: glasswing-web
     runtime: node
-    rootDir: gla$$wing
+    rootDir: glasswing
     plan: free
     buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --dir apps/web build
     startCommand: pnpm --dir apps/web start -- -p $PORT
