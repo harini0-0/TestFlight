@@ -15,6 +15,7 @@ from audit.chain import AuditLog
 from compiler.llm_compile import CompilerFailure, LlmCompiler
 from compiler.pipeline import compiler_prompt_hash, score_rule
 from compiler.recording_model import RecordingModel
+from compiler.references import build_clause_network
 from compiler.testgen import template_cases
 from control_engine.ledger import ZERO, evaluate_condition, natural_language_applicable
 from control_engine.sandbox import run_suite
@@ -52,7 +53,7 @@ from compiler import compile_document, document_hash
 
 Event = Invoice | SpendEvent | PerformanceEvent | ClockTick
 _events: TypeAdapter[Event] = TypeAdapter(Event)
-PACK_KINDS = ("contract", "rebate", "discount", "sla", "renewal", "payment_terms")
+PACK_KINDS = ("contract", "rebate", "discount", "sla", "renewal", "payment_terms", "document")
 KIND_LABELS = {
     "contract": "Supplier contract",
     "rebate": "Rebate schedule",
@@ -206,19 +207,23 @@ class Platform:
         self._audit(tenant_id, "system", "pack.file_stored", [document_id], {"filename": filename, "kind": kind})
         return row
 
-    def process_pack(self, tenant_id: str, pack_id: str, actor: str) -> tuple[BundleRow, dict]:
+    def process_pack(self, tenant_id: str, pack_id: str, actor: str, on_progress=None) -> tuple[BundleRow, dict]:
         pack = self._pack(tenant_id, pack_id)
         sources = self._pack_sources(pack)
         if not sources:
             raise PlatformError(409, "upload at least one document")
+        if on_progress:
+            on_progress({"index": 0, "total": 0, "detail": f"Preparing {len(sources)} uploaded file{'s' if len(sources) != 1 else ''}."})
         parts: list[str] = []
         for index, (kind, filename, body) in enumerate(sources, start=1):
-            parts.append(_prepare_source(index, KIND_LABELS[kind], filename, body))
+            parts.append(_prepare_source(index, _source_heading(kind, filename), body))
         combined = "\n\n".join(parts)
         pack.body = combined
         pack.sha256 = document_hash(combined)
         pack.status = "stored"
-        bundle = self.compile(tenant_id, pack.id, actor)
+        bundle = self.compile(tenant_id, pack.id, actor, on_progress=on_progress)
+        if on_progress:
+            on_progress({"index": 1, "total": 1, "detail": "Running practice checks on the rules just read."})
         report = self.run_tests(tenant_id, bundle.id)
         return bundle, report
 
@@ -232,12 +237,14 @@ class Platform:
         updated = self.resolve_field(tenant_id, bundle.id, rule_id, field, value)
         return updated, live is not None and live.id != updated.id
 
-    def compile(self, tenant_id: str, document_id: str, actor: str) -> BundleRow:
+    def compile(self, tenant_id: str, document_id: str, actor: str, on_progress=None) -> BundleRow:
         document = self._document(tenant_id, document_id)
         model = self._model_for_compile(document.supplier_key)
         threshold = Decimal(self.settings(tenant_id).high_value_threshold)
         try:
-            clauses, rules, embeddings = compile_document(document.body, document.supplier_key, threshold, model)
+            clauses, rules, embeddings = compile_document(
+                document.body, document.supplier_key, threshold, model, on_progress=on_progress
+            )
         except CompilerFailure as exc:
             document.status = "compiler_failed"
             self._audit(tenant_id, actor, "bundle.compile_failed", [document_id], {"detail": exc.detail})
@@ -460,12 +467,12 @@ class Platform:
         )
         return response
 
-    def interpret_unstructured(self, tenant_id: str, text: str, supplier_key: str | None) -> dict:
+    def interpret_unstructured(self, tenant_id: str, text: str, supplier_key: str | None, on_progress=None) -> dict:
         if not llm_enabled():
             raise PlatformError(503, "the language model is not configured")
         try:
             client = chat_client_from_env()
-            events = normalize_unstructured(text, client.complete, supplier_key)
+            events = normalize_unstructured(text, client.complete, supplier_key, on_progress=on_progress)
         except LlmError as exc:
             raise PlatformError(503, exc.detail) from exc
         except NormalizeFailure as exc:
@@ -477,7 +484,17 @@ class Platform:
             [event.transaction_id for event in events],
             {"count": len(events)},
         )
-        results = [self.accept_event(tenant_id, event, f"llm-{event.transaction_id}") for event in events]
+        results = []
+        for index, event in enumerate(events, start=1):
+            if on_progress:
+                on_progress(
+                    {
+                        "index": index,
+                        "total": len(events),
+                        "detail": f"Checking transaction {index} of {len(events)} against the approved rules.",
+                    }
+                )
+            results.append(self.accept_event(tenant_id, event, f"llm-{event.transaction_id}"))
         return {"accepted": len(results), "results": results}
 
     def _model_for_compile(self, supplier_key: str) -> RecordingModel | LlmCompiler:
@@ -683,6 +700,54 @@ class Platform:
             "edges": edges,
             "replay": replay,
         }
+
+    def clause_network(self, tenant_id: str, document_id: str) -> dict:
+        """Cross-document clause reference graph for the spider-web view."""
+        pack = self._document(tenant_id, document_id)
+        bundle = self._active(tenant_id, document_id) or self._latest(tenant_id, document_id)
+        if bundle is None:
+            raise PlatformError(404, "no bundle")
+        from compiler.pipeline import is_boilerplate
+
+        from compiler import segment_clauses
+
+        sources = self._network_sources(pack)
+        documents = []
+        clause_inputs = []
+        for index, (kind, filename, body) in enumerate(sources, start=1):
+            documents.append({"index": index, "kind": kind, "filename": filename, "title": _document_title(body)})
+            # Segment each source on its own so a document's clauses are attributed
+            # to that document, not bled into the previous one after flattening.
+            for clause in segment_clauses(body):
+                clause_inputs.append(
+                    {
+                        "clause_id": f"{index}.{clause.section}",
+                        "section": clause.section,
+                        "heading": clause.heading,
+                        "text": clause.text,
+                        "commercial": not is_boilerplate(clause),
+                        "document_index": index,
+                    }
+                )
+        network = build_clause_network(documents, clause_inputs)  # type: ignore[arg-type]
+        return {
+            "document_id": document_id,
+            "bundle_id": bundle.id,
+            "supplier_key": bundle.supplier_key,
+            "active": bool(bundle.active),
+            "status": bundle.status,
+            **network,
+        }
+
+    def _network_sources(self, pack: DocumentRow) -> list[tuple[str, str, str]]:
+        """Read-only view of the pack's source documents in compile order."""
+        children = self._pack_files(pack.tenant_id, pack.id)
+        if children:
+            ordered = sorted(children, key=lambda row: (PACK_KINDS.index(row.kind) if row.kind in PACK_KINDS else 99, row.filename))
+            return [(row.kind, row.filename, row.body) for row in ordered if row.body.strip()]
+        if pack.body.strip():
+            return [(pack.kind if pack.kind in PACK_KINDS else "contract", pack.filename, pack.body)]
+        return []
 
     def portfolio(self, tenant_id: str) -> dict:
         nodes = []
@@ -1107,14 +1172,21 @@ def _dump(value) -> str:
     return json.dumps(value)
 
 
-def _prepare_source(index: int, label: str, filename: str, body: str) -> str:
+def _source_heading(kind: str, filename: str) -> str:
+    label = KIND_LABELS.get(kind)
+    if not label:
+        return filename
+    return f"{label} ({filename})"
+
+
+def _prepare_source(index: int, heading: str, body: str) -> str:
     namespaced = _HEADING_LINE.sub(
         lambda match: f"{index}.{match.group('section')}{match.group('dot')}{match.group('space')}",
         body.strip(),
     )
     if _HEADING_LINE.search(namespaced):
         return namespaced
-    return f"{index}. {label} ({filename})\n{body.strip()}"
+    return f"{index}. {heading}\n{body.strip()}"
 
 
 def _supplier_from_text(text: str) -> str:
@@ -1122,6 +1194,16 @@ def _supplier_from_text(text: str) -> str:
         if line.lower().startswith("supplier:"):
             return line.split(":", 1)[1].strip().lower().replace(" ", "-")
     return "unknown"
+
+
+def _document_title(body: str) -> str:
+    """First meaningful line of a document, used as a citable title."""
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.lower().startswith(("supplier:", "buyer:", "effective date:", "currency:", "contract year:")):
+            continue
+        return stripped[:120]
+    return ""
 
 
 def _event_date(event: Event) -> date:

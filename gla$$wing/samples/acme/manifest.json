@@ -1,0 +1,9 @@
+{
+  "supplier_key": "Acme Field Services",
+  "effective_date": "2026-02-01",
+  "documents": [
+    {"kind": "contract", "path": "contracts/master-services-agreement.txt"},
+    {"kind": "contract", "path": "contracts/statement-of-work.txt"}
+  ],
+  "live": []
+}

@@ -1,0 +1,38 @@
+One public procurement relationship, for a single workspace test.
+
+Vendor: Insight Public Sector, Inc.
+Buyer framework: Texas Department of Information Resources
+Contract: DIR-CPO-5239 (Adobe and Microsoft software)
+Term: starts 10/05/2023, renews through 10/05/2027, expiration 10/05/2029
+Every order and quote below cites DIR-CPO-5239.
+
+Load 01-contract-rules as the rule documents.
+Load 02-orders-and-quotes as the transactions to check against those rules.
+
+Rules that should come out of the contract set
+- Appendix C: Adobe customer discount is 6% off the publisher discount level.
+  Volume floors: CLP Education 100,000+ points; CLP Government 300,000+ points.
+  Microsoft Enterprise Agreement / Select Plus customer discount is 16.50%.
+  Every quoted price must include the DIR administrative fee of 0.75% of the customer price.
+- Contract: initial term up to 2 years, then automatic renewal unless notice is given at least 60 days before the renewal date.
+- Appendix A: correct invoices are due 30 calendar days after goods, services, or a correct invoice, whichever is later.
+  Invoices must match the purchase order.
+- Amendment 1 changes a compliance clause only. Pricing and payment terms stay in force.
+
+Transactions
+- PUCT purchase order 24-0000723 (07/18/2024), payment terms NET30, cites DIR-CPO-5239 and quote 02277531700.
+  Acrobat Pro: 283 x $99.44. Creative Cloud: 5 x $754.04. Total $31,911.72. Term 08/01/2024-07/31/2025.
+- City of Grand Prairie Insight quote 0227263134 (03/27/2024), renewal window 05/15/2024-06/14/2024.
+  States 6% off list under DIR-CPO-5239. Acrobat Pro list $105.00, unit $99.44. Creative Cloud list $796.20, unit $754.04.
+- Fort Bend County addendum plus Insight quote 0228974877 (11/14/2025).
+  Incorporates DIR-CPO-5239. Payment Net 30. Does not auto-renew; optional years 2 and 3 are priced and must be renewed in writing.
+  States 6% off list. Base year $207,978.47, three-year quote total $625,595.74, plus true-up lines.
+
+Check to run
+List x 0.94 x 1.0075 is the 6% discount with the 0.75% fee included.
+Grand Prairie and the PUCT order match that formula on the Acrobat and Creative Cloud lines.
+Fort Bend states 6% off list, but the unit prices are well below that floor (Acrobat $130.90 vs list $286.00; All Apps $1,529.43 vs list $1,831.00). That is a deeper discount than the contract minimum, and the stated 6% does not reconcile to the unit price.
+
+The June 2026 Adobe and May 2026 Microsoft workbooks are the current catalogs Insight posts for this same contract. The 2024 and 2025 orders use the list prices printed on those orders, not necessarily the 2026 workbook.
+
+Sources are public filings: dir.texas.gov contract DIR-CPO-5239, Insight's DIR-CPO-5239 page, the Public Utility Commission of Texas purchase-order file, a City of Grand Prairie meeting attachment, and a Fort Bend County Commissioners Court agenda attachment.

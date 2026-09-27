@@ -58,6 +58,32 @@ body {
   border-radius: 12px;
 }
 
+.dropzone {
+  display: flex;
+  min-width: 0;
+  min-height: 96px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  padding: 0.9rem 1rem;
+  text-align: left;
+  cursor: pointer;
+  background: white;
+  border: 1.5px dashed #c8c0b2;
+  border-radius: 12px;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.dropzone.is-over {
+  border-color: #1f3a5f;
+  background: #f3f6fa;
+}
+
+.dropzone input {
+  max-width: 100%;
+}
+
 .step-pane {
   animation: step-in 200ms ease;
 }
@@ -151,6 +177,84 @@ body {
   height: 6px;
   background: #94a3b8;
   border: none;
+}
+
+.react-flow__node-web {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+
+.clause-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: white;
+  border: 1px solid #e6e2da;
+  border-radius: 999px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+}
+
+.clause-node-hub {
+  padding: 8px 16px 8px 8px;
+  border-width: 2px;
+}
+
+.clause-node-ext {
+  padding: 6px 14px 6px 8px;
+  border-style: dashed;
+  border-width: 2px;
+  background: #f8fafc;
+}
+
+.clause-node-spoke {
+  padding: 5px 12px;
+  border-radius: 8px;
+  max-width: 168px;
+}
+
+.clause-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  flex: none;
+}
+
+.clause-node-body {
+  min-width: 0;
+}
+
+.clause-kicker {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.clause-title {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #0f172a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+.clause-handle {
+  width: 1px;
+  height: 1px;
+  min-width: 1px;
+  min-height: 1px;
+  background: transparent;
+  border: none;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  opacity: 0;
 }
 
 @keyframes radar-pulse {
@@ -250,6 +354,22 @@ body {
   font-size: 0.875rem;
   line-height: 1.45;
   color: #57534e;
+}
+
+.ai-meter {
+  margin: 18px auto 0;
+  height: 6px;
+  width: min(240px, 100%);
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e6e2da;
+}
+
+.ai-meter > span {
+  display: block;
+  height: 100%;
+  background: #1f3a5f;
+  transition: width 0.25s ease;
 }
 
 @keyframes ai-ping {

@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import { RuleGraph } from "@/components/RuleGraph";
-import { API_URL, api, fail, token } from "@/lib/api";
+import { API_URL, api, fail, streamNdjson, token, type ProgressEvent } from "@/lib/api";
 
 type Rule = {
   rule_id: string;
@@ -28,15 +29,6 @@ const steps = [
   ["live", "4. Live period"],
 ] as const;
 
-const zones = [
-  ["contract", "Contracts"],
-  ["rebate", "Rebates"],
-  ["discount", "Discounts"],
-  ["sla", "SLAs"],
-  ["renewal", "Renewal dates"],
-  ["payment_terms", "Payment terms"],
-] as const;
-
 type Step = (typeof steps)[number][0];
 
 function processTone(kind: "current" | "done" | "waiting") {
@@ -44,9 +36,12 @@ function processTone(kind: "current" | "done" | "waiting") {
   return "panel p-3 space-y-2 min-w-0";
 }
 
-function processingCopy(busy: string): { title: string; detail: string } | null {
+function processingCopy(busy: string, progress: ProgressEvent | null): { title: string; detail: string } | null {
   if (busy === "Compiling the engine") {
-    return { title: "AI is reading the documents", detail: "The uploaded files are being turned into one rule engine." };
+    return {
+      title: progress && progress.total > 0 ? `Reading part ${Math.max(progress.index, 1)} of ${progress.total}` : "AI is reading the documents",
+      detail: progress?.detail || "Long documents are split into parts so every clause is read. Nothing is skipped to fit one request.",
+    };
   }
   if (busy === "Running practice checks") {
     return { title: "Running the practice checks", detail: "Each rule is being tested before you review the engine." };
@@ -55,7 +50,10 @@ function processingCopy(busy: string): { title: string; detail: string } | null 
     return { title: "Saving the rebate confirmation", detail: "The engine will use this application on the next practice run." };
   }
   if (busy === "Checking the invoice") {
-    return { title: "AI is reading this invoice", detail: "The invoice is being structured, then checked against the rules." };
+    return {
+      title: progress && progress.total > 0 ? `Invoice part ${Math.max(progress.index, 1)} of ${progress.total}` : "AI is reading this invoice",
+      detail: progress?.detail || "The invoice is read in parts, then each line is checked against the rules.",
+    };
   }
   return null;
 }
@@ -81,6 +79,9 @@ export default function WorkPage() {
   const [acks, setAcks] = useState([false, false, false]);
   const [showFlow, setShowFlow] = useState(false);
   const [spotlight, setSpotlight] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [aiProgress, setAiProgress] = useState<ProgressEvent | null>(null);
 
   async function load() {
     const body = await api<Pack>(`/v1/packs/${params.id}`);
@@ -143,21 +144,33 @@ export default function WorkPage() {
     }
   }
 
-  async function upload(kind: string, files: FileList | File[]) {
-    for (const file of Array.from(files)) {
-      const response = await fetch(`${API_URL}/v1/packs/${params.id}/files`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token()}`,
-          "X-Document-Kind": kind,
-          "X-Filename": file.name,
-          "Content-Type": file.type || "text/plain",
-        },
-        body: await file.arrayBuffer(),
-      });
-      if (!response.ok) fail(await response.text(), "Upload failed");
+  async function upload(files: FileList | File[]) {
+    const list = Array.from(files);
+    if (!list.length) return false;
+    setUploading(true);
+    let stored = false;
+    try {
+      for (const file of list) {
+        const response = await fetch(`${API_URL}/v1/packs/${params.id}/files`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token()}`,
+            "X-Document-Kind": "document",
+            "X-Filename": file.name,
+            "Content-Type": file.type || "text/plain",
+          },
+          body: await file.arrayBuffer(),
+        });
+        if (!response.ok) fail(await response.text(), "Upload failed");
+      }
+      stored = true;
+    } catch {
+      setMessage("");
+    } finally {
+      setUploading(false);
+      await load().catch(() => undefined);
     }
-    await load();
+    return stored;
   }
 
   async function checkInvoice() {
@@ -167,26 +180,24 @@ export default function WorkPage() {
     const text = invoiceText.trim();
     if (!file && !text) return;
     setBusy("Checking the invoice");
+    setAiProgress(null);
     try {
       let posted: { accepted: number; results: Array<{ transaction_id: string; evaluations: Array<{ outcome: string; explanation: string }> }> };
       if (file) {
-        const response = await fetch(`${API_URL}/v1/transactions/interpret`, {
+        posted = await streamNdjson(`/v1/transactions/interpret`, {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${token()}`,
             "X-Filename": file.name,
             "X-Supplier-Key": supplierKey,
             "Content-Type": file.type || "application/octet-stream",
           },
           body: await file.arrayBuffer(),
-        });
-        if (!response.ok) fail(await response.text(), "Could not read that invoice");
-        posted = await response.json();
+        }, setAiProgress);
       } else {
-        posted = await api("/v1/transactions/interpret", {
+        posted = await streamNdjson("/v1/transactions/interpret", {
           method: "POST",
           body: JSON.stringify({ text, supplier_key: supplierKey }),
-        });
+        }, setAiProgress);
       }
       const leaks = posted.results.flatMap((row) =>
         row.evaluations.filter((item) => item.outcome === "violation").map((item) => `${row.transaction_id}: ${item.explanation}`),
@@ -208,6 +219,7 @@ export default function WorkPage() {
       setMessage("");
     } finally {
       setBusy("");
+      setAiProgress(null);
     }
   }
 
@@ -232,7 +244,8 @@ export default function WorkPage() {
     return "waiting";
   };
 
-  const processing = (step === "process" || step === "live") ? processingCopy(busy) : null;
+  const processing = (step === "process" || step === "live") ? processingCopy(busy, aiProgress) : null;
+  const meter = aiProgress && aiProgress.total > 0 ? Math.min(100, Math.round((aiProgress.index / aiProgress.total) * 100)) : 8;
 
   return (
     <>
@@ -253,20 +266,44 @@ export default function WorkPage() {
 
       {step === "upload" && (
         <section key="upload" className="step-pane flex-1 min-h-0 flex flex-col gap-3">
-          <p className="text-sm text-stone-600 shrink-0">Add every commercial file for this supplier. You can drop more than one file in each group.</p>
-          <div className="grid grid-cols-3 grid-rows-2 gap-3 flex-1 min-h-0">
-            {zones.map(([kind, label]) => (
-              <label key={kind} className="panel p-3 block cursor-pointer min-h-0 overflow-auto" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); upload(kind, event.dataTransfer.files).catch(() => undefined); }}>
-                <div className="font-medium">{label}</div>
-                <div className="text-xs text-stone-500 mt-1">TXT, CSV, or PDF</div>
-                <input className="mt-2 block w-full text-sm" type="file" accept=".txt,.csv,.pdf,text/plain,application/pdf" multiple onChange={(event) => { if (event.target.files) upload(kind, event.target.files).catch(() => undefined); }} />
-                <ul className="mt-2 text-xs text-stone-600 space-y-1">
-                  {pack.files.filter((file) => file.kind === kind).map((file) => <li key={file.document_id}>{file.filename}</li>)}
-                </ul>
-              </label>
-            ))}
+          <label
+            className={`dropzone shrink-0 ${dragOver ? "is-over" : ""}`}
+            onDragOver={(event) => { event.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(event) => { event.preventDefault(); setDragOver(false); upload(event.dataTransfer.files); }}
+          >
+            <div className="min-w-0">
+              <div className="text-sm font-medium">{uploading ? "Adding the files" : "Drop documents here"}</div>
+              <p className="text-xs text-stone-600 mt-0.5">TXT, CSV, PDF, or Excel (.xlsx). Several files at once is fine. No category needed.</p>
+            </div>
+            <input
+              className="block text-sm shrink-0"
+              type="file"
+              accept=".txt,.csv,.pdf,.xlsx,.xlsm,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              multiple
+              disabled={uploading}
+              onChange={(event) => {
+                if (event.target.files) upload(event.target.files);
+                event.target.value = "";
+              }}
+            />
+            {uploading && <span className="spinner shrink-0" />}
+          </label>
+          <div className="panel flex-1 min-h-0 flex flex-col overflow-hidden">
+            <div className="px-4 py-3 border-b border-line text-sm font-medium shrink-0">
+              {pack.files.length === 0 ? "No documents yet" : `${pack.files.length} document${pack.files.length === 1 ? "" : "s"}`}
+            </div>
+            {pack.files.length === 0 ? (
+              <p className="px-4 py-3 text-sm text-stone-600">Add contracts, rebates, discounts, service levels, and payment terms. Processing reads each file as text.</p>
+            ) : (
+              <ul className="min-h-0 flex-1 overflow-auto">
+                {pack.files.map((file) => (
+                  <li key={file.document_id} className="px-4 py-2.5 border-b border-line last:border-b-0 text-sm truncate">{file.filename}</li>
+                ))}
+              </ul>
+            )}
           </div>
-          <button className="btn btn-primary shrink-0 self-start" disabled={!ready} onClick={() => setStep("process")}>Continue to process</button>
+          <button className="btn btn-primary shrink-0 self-start" disabled={!ready || uploading} onClick={() => setStep("process")}>Continue to process</button>
         </section>
       )}
 
@@ -294,16 +331,25 @@ export default function WorkPage() {
                   return;
                 }
                 setBusy("Compiling the engine");
+                setAiProgress(null);
                 try {
-                  const processed = await api<{ tests: { results: typeof report }; bundle_id: string }>(`/v1/packs/${params.id}/process`, { method: "POST" });
-                  setReport(processed.tests.results || []);
+                  const processed = await streamNdjson<{ tests: { results: typeof report }; rules: Rule[]; bundle_id: string }>(`/v1/packs/${params.id}/process`, { method: "POST" }, setAiProgress);
+                  setReport(processed.tests?.results || []);
                   setAwaitingRetest(false);
-                  setMessage("Processing finished. Review the tests, then view the engine.");
-                  await load();
-                } catch {
-                  setMessage("");
+                  const body = await load();
+                  const rebatesOpen = (body.bundle?.rules || processed.rules || []).some((rule) => rule.needs_confirmation.includes("application"));
+                  if (rebatesOpen) {
+                    setMessage("Processing finished. Confirm how each rebate applies, then view the engine.");
+                    setStep("process");
+                  } else {
+                    setMessage("Processing finished. The rule engine is ready to review.");
+                    setStep("engine");
+                  }
+                } catch (error) {
+                  setMessage(error instanceof Error ? error.message : "Processing failed");
                 } finally {
                   setBusy("");
+                  setAiProgress(null);
                 }
               }}>{busy === "Compiling the engine" ? "Compiling the engine" : busy === "Running practice checks" ? "Running practice checks" : retestOnly ? "Run practice checks" : "Process documents"}</button>
             </div>
@@ -382,6 +428,8 @@ export default function WorkPage() {
         <section key="engine" className="step-pane flex-1 min-h-0 flex flex-col gap-2">
           <div className="flex items-center justify-between gap-3 shrink-0">
             <p className="text-sm text-stone-700">Hover a node for the clause, formula, and ledger. Click a rule to edit it. A live edit becomes the next draft and does not replace the running engine until you approve it.</p>
+            <div className="flex items-center gap-2 shrink-0">
+            <Link className="btn" href={`/work/${params.id}/network`}>Clause network</Link>
             <button
               className="btn btn-primary shrink-0"
               disabled={!pack.bundle || openRebates.length > 0 || Boolean(busy)}
@@ -392,6 +440,7 @@ export default function WorkPage() {
             >
               Approve rules engine
             </button>
+            </div>
           </div>
           {!pack.bundle && <p className="text-sm text-ink shrink-0">Process the documents first.</p>}
           {openRebates.length > 0 && <p className="text-sm text-ink shrink-0">Tick the open rebate boxes on Process before you approve.</p>}
@@ -450,7 +499,7 @@ export default function WorkPage() {
               <button type="button" className="text-left text-xs font-medium text-accent shrink-0" onClick={() => setShowPeriod((open) => !open)}>{showPeriod ? "Hide document upload" : "Add a document during the period"}</button>
               {showPeriod && (
                 <div className="min-h-0 overflow-auto space-y-1.5">
-              <input className="block w-full text-xs" type="file" accept=".txt,.csv,.pdf,text/plain,application/pdf" onChange={(event) => { if (event.target.files) upload("contract", event.target.files).then(() => setMessage("Document stored. Rebuild the draft when you want it in the engine.")).catch(() => undefined); }} />
+              <input className="block w-full text-xs" type="file" accept=".txt,.csv,.pdf,.xlsx,.xlsm,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => { if (event.target.files) upload(event.target.files).then((stored) => { if (stored) setMessage("Document stored. Rebuild the draft when you want it in the engine."); }); }} />
               <button className="btn" disabled={Boolean(busy)} onClick={async () => {
                 setBusy("Compiling the engine");
                 try {
@@ -543,6 +592,11 @@ export default function WorkPage() {
           <div className="ai-kicker">Processing</div>
           <h2 id="ai-working-title" className="ai-title">{processing.title}</h2>
           <p className="ai-detail">{processing.detail}</p>
+          {(busy === "Compiling the engine" || busy === "Checking the invoice") && (
+            <div className="ai-meter" aria-hidden="true">
+              <span style={{ width: `${meter}%` }} />
+            </div>
+          )}
         </div>
       </div>
     )}

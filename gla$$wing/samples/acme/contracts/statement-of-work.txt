@@ -1,0 +1,27 @@
+Supplier: Acme Field Services
+
+Statement of Work - Turbine Line Calibration
+Buyer: Northline Industrial
+Effective date: 2026-03-01
+Currency: USD
+
+1. Incorporation
+This Statement of Work is issued under and incorporated into the Master Services Agreement. Where this document is silent, the Master Services Agreement controls. Where a term here conflicts with the Master Services Agreement, this Statement of Work controls for the work described below only.
+
+2. Scope
+Acme calibrates the turbine line sensors at the Ohio plant on a monthly cadence for the 2026 contract year. Each visit covers up to forty sensors and produces a signed calibration report per the checklist in Exhibit A.
+
+3. Rate
+Labor for this work is billed at the standard technician rate in Section 4 of the Master Services Agreement. Emergency call-outs requested by Buyer are billed at the emergency rate in that same section.
+
+4. Invoicing
+Acme invoices this work under Section 3 of the Master Services Agreement, itemized by visit and technician hours. Materials consumed during calibration are billed separately and are not part of the labor rate card.
+
+5. Service level
+The response and restoration commitments in Section 5 of the Master Services Agreement, measured each quarter, apply to any outage of the turbine line discovered during a calibration visit.
+
+6. Liability
+The liability cap in Section 7 of the Master Services Agreement, and only that cap, applies to the work in this Statement of Work. Nothing in this Statement of Work raises that cap.
+
+7. Term
+This Statement of Work runs for the 2026 contract year and expires with the primary term of the Master Services Agreement unless renewed in writing.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -68,24 +69,124 @@ def looks_like_document(payload: bytes, filename: str) -> bool:
         return True
     if payload.startswith(b"%PDF") or payload.startswith(b"PK"):
         return True
-    if name.endswith(".pdf") or name.endswith(".docx"):
+    if name.endswith(".pdf") or name.endswith(".docx") or name.endswith(".xlsx") or name.endswith(".xlsm"):
         return payload.startswith(b"%PDF") or payload.startswith(b"PK")
     return False
 
 
+def _is_xlsx(payload: bytes, filename: str) -> bool:
+    name = filename.lower()
+    return name.endswith((".xlsx", ".xlsm")) and payload.startswith(b"PK")
+
+
+def _cell_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).replace("\t", " ").replace("\n", " ").strip()
+
+
+def _xlsx_text(payload: bytes) -> str:
+    import io
+
+    from openpyxl import load_workbook
+
+    book = load_workbook(io.BytesIO(payload), read_only=True, data_only=True)
+    sections: list[str] = []
+    try:
+        for sheet in book.worksheets:
+            if getattr(sheet, "sheet_state", "visible") != "visible":
+                continue
+            lines: list[str] = []
+            for row in sheet.iter_rows(values_only=True):
+                cells = [_cell_text(value) for value in row]
+                if any(cells):
+                    lines.append("\t".join(cells).rstrip())
+            if lines:
+                sections.append(f"Sheet: {sheet.title}\n" + "\n".join(lines))
+    finally:
+        book.close()
+    return "\n\n".join(sections)
+
+
+_PDF_DUMP = re.compile(r"(^%PDF-)|(\bendobj\b)|(\bendstream\b)|(\bstartxref\b)", re.MULTILINE)
+_PDF_NOISE_LINE = re.compile(
+    r"^\s*(%PDF-|xref\b|trailer\b|startxref\b|endobj\b|endstream\b|\d+\s+\d+\s+obj\b|/Type\b|/Filter\b)"
+)
+
+
+def _is_visible_char(ch: str) -> bool:
+    code = ord(ch)
+    if ch in "\t ":
+        return True
+    if code < 32 or code == 127 or 0x80 <= code <= 0x9F:
+        return False
+    if 0xE000 <= code <= 0xF8FF or 0xF0000 <= code <= 0x10FFFD:
+        return False
+    if code in {0xFFFD, 0xFFFE, 0xFFFF, 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF}:
+        return False
+    return True
+
+
+def _is_pdf_dump(text: str) -> bool:
+    head = text.lstrip()[:400]
+    if head.startswith("%PDF-"):
+        return True
+    return "endobj" in head and "/Type" in head
+
+
+def visible_text(text: str) -> str:
+    """Words and numbers a person can read. Drops file syntax and hidden glyphs."""
+    if not text or _is_pdf_dump(text):
+        return ""
+    lines: list[str] = []
+    blank = False
+    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if _PDF_NOISE_LINE.match(raw) or (_PDF_DUMP.search(raw) and "<<" in raw):
+            continue
+        kept = [" " if ch == "\u00a0" else ch for ch in raw if _is_visible_char(ch)]
+        line = "".join(kept).rstrip(" \t")
+        if not line.strip():
+            hidden_only = bool(raw.strip()) and not any(ch not in "\t " and _is_visible_char(ch) for ch in raw)
+            if hidden_only:
+                continue
+            if lines and not blank:
+                lines.append("")
+                blank = True
+            continue
+        blank = False
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _pdf_text(payload: bytes) -> str:
+    import io
+
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(payload))
+        text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+    except Exception:
+        return ""
+    if text.lstrip().startswith("%PDF"):
+        return ""
+    return text
+
+
 class LocalPdfParser:
     def extract_text(self, payload: bytes, filename: str) -> str:
-        if payload.startswith(b"%PDF"):
+        if _is_xlsx(payload, filename):
             try:
-                import io
-
-                from pypdf import PdfReader
-
-                reader = PdfReader(io.BytesIO(payload))
-                return "\n".join(page.extract_text() or "" for page in reader.pages)
+                raw = _xlsx_text(payload)
             except Exception:
-                return payload.decode("utf-8", errors="ignore")
-        return payload.decode("utf-8", errors="ignore")
+                raw = ""
+        elif payload.startswith(b"%PDF"):
+            raw = _pdf_text(payload)
+        else:
+            raw = payload.decode("utf-8", errors="ignore")
+        return visible_text(raw)
 
 
 @dataclass
