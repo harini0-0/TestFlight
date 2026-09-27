@@ -26,14 +26,18 @@ def _case(rule: RuleIR, title: str, events: list[dict], outcome: str, amount: st
     )
 
 
-def _invoice(rule: RuleIR, number: str, amount: str, category: str = "goods", rebate: str | None = None, day: int = 1, sku: str | None = None, unit: str | None = None, qty: str = "1") -> dict:
+def _invoice(rule: RuleIR, number: str, amount: str, category: str | None = None, rebate: str | None = None, day: int = 1, sku: str | None = None, unit: str | None = None, qty: str = "1") -> dict:
     extended = Decimal(amount)
     quantity = Decimal(qty)
     unit_price = Decimal(unit) if unit else (extended / quantity if quantity else extended)
+    label = sku or rule.sku or "goods"
+    description = label
+    if rule.description_key and rule.description_key.lower() not in description.lower():
+        description = f"{description} {rule.description_key}"
     line = {
         "sku": sku or rule.sku,
-        "description": sku or rule.sku or "goods",
-        "category": category,
+        "description": description,
+        "category": category or _billable_category(rule),
         "quantity": str(quantity),
         "unit_price": {"amount": str(unit_price), "currency": "USD"},
         "extended_amount": {"amount": str(extended), "currency": "USD"},
@@ -51,8 +55,113 @@ def _invoice(rule: RuleIR, number: str, amount: str, category: str = "goods", re
     }
 
 
+def _billable_category(rule: RuleIR) -> str:
+    """A category this rule will actually score."""
+    wanted = (rule.trigger_filters or {}).get("category")
+    if wanted:
+        return wanted
+    if rule.eligibility and rule.eligibility.include_categories:
+        return rule.eligibility.include_categories[0]
+    excluded = {item.lower() for item in (rule.eligibility.exclude if rule.eligibility else [])}
+    if "goods" not in excluded:
+        return "goods"
+    return "services"
+
+
+def _category_is_eligible(rule: RuleIR, category: str) -> bool:
+    if rule.eligibility is None:
+        return True
+    include = {item.lower() for item in rule.eligibility.include_categories}
+    exclude = {item.lower() for item in rule.eligibility.exclude}
+    if category.lower() in exclude:
+        return False
+    return not include or category.lower() in include
+
+
+def _rejected_category(rule: RuleIR) -> str | None:
+    """A category the rule ignores, when the rule names one."""
+    if rule.eligibility is None:
+        return None
+    if rule.eligibility.exclude:
+        return rule.eligibility.exclude[0]
+    include = {item.lower() for item in rule.eligibility.include_categories}
+    if not include:
+        return None
+    for candidate in ("freight", "tax", "excluded"):
+        if candidate not in include:
+            return candidate
+    return None
+
+
+def _triggers(rule: RuleIR) -> set[str]:
+    return {item.strip() for item in rule.trigger}
+
+
+def _miss_event(rule: RuleIR) -> dict:
+    """An event this rule's trigger does not accept."""
+    triggers = _triggers(rule)
+    for event_type in ("invoice.posted", "spend.adjusted", "performance.reported", "clock.tick"):
+        if event_type not in triggers:
+            return _bare_event(rule, event_type)
+    event = _bare_event(rule, "clock.tick")
+    event["supplier_key"] = f"{rule.supplier_key}-other"
+    return event
+
+
+def _bare_event(rule: RuleIR, event_type: str) -> dict:
+    if event_type == "invoice.posted":
+        return _invoice(rule, "MISS", "10")
+    if event_type == "spend.adjusted":
+        return {
+            "event_type": "spend.adjusted",
+            "transaction_id": "tx-miss",
+            "supplier_key": rule.supplier_key,
+            "category": "goods",
+            "amount": {"amount": "10", "currency": "USD"},
+            "effective_on": "2026-01-02",
+            "reason": "",
+        }
+    if event_type == "performance.reported":
+        return _perf(rule, "1")
+    return _tick(rule, date(2026, 1, 2), False)
+
+
+_SHORTAGE = "The supplier did not prioritize the buyer during the shortage."
+
+
+def _matching_judgment_event(rule: RuleIR) -> dict | None:
+    """An event the rule's trigger accepts, carrying the shortage narrative for the judge."""
+    triggers = _triggers(rule)
+    if "invoice.posted" in triggers:
+        event = _invoice(rule, "NL1", "10")
+        event["lines"][0]["description"] = _SHORTAGE
+        return event
+    if "performance.reported" in triggers:
+        return _perf(rule, "0", narrative=_SHORTAGE)
+    if "spend.adjusted" in triggers:
+        return {
+            "event_type": "spend.adjusted",
+            "transaction_id": "tx-nl",
+            "supplier_key": rule.supplier_key,
+            "category": _billable_category(rule),
+            "amount": {"amount": "10", "currency": "USD"},
+            "effective_on": "2026-01-02",
+            "reason": _SHORTAGE,
+        }
+    if "clock.tick" in triggers:
+        event = _tick(rule, date(2026, 1, 2), False)
+        event["transaction_id"] = _SHORTAGE
+        return event
+    return None
+
+
 def template_cases(rule: RuleIR) -> list[TestCase]:
+    if rule.kind == "natural_language" or rule.rule_type == "natural_language":
+        return _natural_language_cases(rule)
     if rule.rule_type == "threshold_rebate" and rule.threshold and rule.obligation and rule.obligation.application:
+        category = _billable_category(rule)
+        if not _category_is_eligible(rule, category):
+            return []
         threshold = rule.threshold.amount
         rate = rule.obligation.rate
         below = _q(threshold / Decimal("2"))
@@ -61,29 +170,26 @@ def template_cases(rule: RuleIR) -> list[TestCase]:
         if application == "incremental_above_threshold":
             cross_amount = _q(rate * Decimal("50"))
             later_amount = _q(rate * later)
-            exact_amount = _q(rate * Decimal("0"))  # exactly on the line, excess is 0 for incremental? 
-            # balance_before 0, invoice == threshold, base = threshold - 0? 
-            # balance_before >= threshold is false, base = balance_after - threshold = 0.
-            exact_outcome = "pass"
             exact_amount = Decimal("0")
         elif application == "all_eligible_once_crossed":
             cross_amount = _q(rate * (threshold + Decimal("50")))
             later_amount = Decimal("0")
-            exact_outcome = "violation"
             exact_amount = _q(rate * threshold)
         else:
             cross_amount = _q(rate * Decimal("150"))
             later_amount = _q(rate * later)
-            exact_outcome = "violation"
             exact_amount = _q(rate * threshold)
+        exact_outcome = "violation" if exact_amount > Decimal("0") else "pass"
+        cross_outcome = "violation" if cross_amount > Decimal("0") else "pass"
         exact_rebate = _q(rate * threshold)
         later_outcome = "violation" if later_amount > Decimal("0") else "pass"
-        return [
-            _case(rule, "spend below the threshold", [_invoice(rule, "BELOW", str(below), rebate="0")], "pass", "0"),
+        rejected = _rejected_category(rule)
+        cases = [
+            _case(rule, "spend below the threshold", [_invoice(rule, "BELOW", str(below), category=category, rebate="0")], "pass", "0"),
             _case(
                 rule,
                 "spend exactly on the threshold with no rebate",
-                [_invoice(rule, "EXACT", str(threshold), rebate="0")],
+                [_invoice(rule, "EXACT", str(threshold), category=category, rebate="0")],
                 exact_outcome,
                 str(exact_amount),
             ),
@@ -91,18 +197,18 @@ def template_cases(rule: RuleIR) -> list[TestCase]:
                 rule,
                 "invoice that crosses the threshold",
                 [
-                    _invoice(rule, "PRE", str(threshold - Decimal("100")), rebate="0", day=2),
-                    _invoice(rule, "CROSS", "150", rebate="0", day=3),
+                    _invoice(rule, "PRE", str(threshold - Decimal("100")), category=category, rebate="0", day=2),
+                    _invoice(rule, "CROSS", "150", category=category, rebate="0", day=3),
                 ],
-                "violation",
+                cross_outcome,
                 str(cross_amount),
             ),
             _case(
                 rule,
                 "later invoice missing the rebate",
                 [
-                    _invoice(rule, "BASE", str(threshold), rebate=str(exact_rebate), day=4),
-                    _invoice(rule, "LATER", str(later), rebate="0", day=5),
+                    _invoice(rule, "BASE", str(threshold), category=category, rebate=str(exact_rebate), day=4),
+                    _invoice(rule, "LATER", str(later), category=category, rebate="0", day=5),
                 ],
                 later_outcome,
                 str(later_amount),
@@ -111,20 +217,25 @@ def template_cases(rule: RuleIR) -> list[TestCase]:
                 rule,
                 "later invoice with the correct rebate",
                 [
-                    _invoice(rule, "BASE2", str(threshold), rebate=str(exact_rebate), day=6),
-                    _invoice(rule, "OK", str(later), rebate=str(later_amount if later_amount > 0 else exact_rebate), day=7),
+                    _invoice(rule, "BASE2", str(threshold), category=category, rebate=str(exact_rebate), day=6),
+                    _invoice(rule, "OK", str(later), category=category, rebate=str(later_amount if later_amount > 0 else exact_rebate), day=7),
                 ],
                 "pass",
                 "0",
             ),
-            _case(
-                rule,
-                "freight is excluded from eligible spend",
-                [_invoice(rule, "FR", "5000000", category="freight", rebate="0", day=8)],
-                "pass",
-                "0",
-            ),
         ]
+        category_filter = (rule.trigger_filters or {}).get("category")
+        if rejected and (not category_filter or category_filter.lower() == rejected.lower()):
+            cases.append(
+                _case(
+                    rule,
+                    "ineligible category is ignored",
+                    [_invoice(rule, "FR", "5000000", category=rejected, rebate="0", day=8)],
+                    "pass",
+                    "0",
+                )
+            )
+        return cases
     if rule.rule_type == "price_match" and rule.contracted_price is not None:
         price = rule.contracted_price.amount
         over = price + Decimal("2")
@@ -153,7 +264,7 @@ def template_cases(rule: RuleIR) -> list[TestCase]:
             _case(rule, "past the notice deadline", [_tick(rule, past, False)], "violation", "0"),
             _case(rule, "before the notice window", [_tick(rule, before, False)], "pass", None),
         ]
-    if rule.rule_type == "sla_penalty" and rule.target is not None:
+    if rule.rule_type == "sla_penalty" and rule.target is not None and rule.penalty_rate is not None and rule.metric:
         return [
             _case(rule, "sla met", [_perf(rule, str(rule.target))], "pass", "0"),
             _case(
@@ -186,35 +297,39 @@ def template_cases(rule: RuleIR) -> list[TestCase]:
                 str(_q(Decimal("1") * qty)),
             ),
         ]
-    if rule.rule_type == "natural_language":
-        clause_id = rule.source_clause_ids[0]
-        triggers = set(rule.trigger or [])
-        if "invoice.posted" in triggers:
-            breach = _invoice(rule, "NL1", "10")
-            breach["lines"][0]["description"] = "The supplier did not prioritize the buyer during the shortage."
-            matched = [breach]
-        else:
-            matched = [_perf(rule, "0", narrative="The supplier did not prioritize the buyer during the shortage.")]
-        return [
-            _case(
-                rule,
-                "trigger miss skips the model",
-                [_tick(rule, date(2026, 1, 2), False)],
-                "skipped",
-                None,
-                expect_model_call=False,
-            ),
-            _case(
-                rule,
-                "trigger match returns a judgment",
-                matched,
-                "violation",
-                None,
-                expect_model_call=True,
-                cite_clause_id=clause_id,
-            ),
-        ]
     return []
+
+
+def _natural_language_cases(rule: RuleIR) -> list[TestCase]:
+    clause_id = rule.source_clause_ids[0]
+    cases = [
+        _case(
+            rule,
+            "trigger miss skips the model",
+            [_miss_event(rule)],
+            "skipped",
+            None,
+            expect_model_call=False,
+        ),
+    ]
+    # The breach narrative is about a shortage. It only applies to a clause that says so.
+    about_shortage = "shortage" in (rule.clause_text or "").lower() or "priorit" in (rule.clause_text or "").lower()
+    matched = _matching_judgment_event(rule) if about_shortage else None
+    if matched is None:
+        return cases
+    cases.append(
+        _case(
+            rule,
+            "trigger match returns a judgment",
+            [matched],
+            "violation",
+            None,
+            expect_model_call=True,
+            cite_clause_id=clause_id,
+            accept_any_judgment=True,
+        )
+    )
+    return cases
 
 
 def _tick(rule: RuleIR, day: date, notice: bool) -> dict:

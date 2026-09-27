@@ -33,6 +33,31 @@ List x 0.94 x 1.0075 is the 6% discount with the 0.75% fee included.
 Grand Prairie and the PUCT order match that formula on the Acrobat and Creative Cloud lines.
 Fort Bend states 6% off list, but the unit prices are well below that floor (Acrobat $130.90 vs list $286.00; All Apps $1,529.43 vs list $1,831.00). That is a deeper discount than the contract minimum, and the stated 6% does not reconcile to the unit price.
 
+Stage 4 invoice
+03-stage4-invoice/Insight-Invoice-0229611840-Williamson-County-DIR-CPO-5239.pdf
+Fabricated Insight invoice, 15 September 2026, amount due $637,681.40, Net 30, contract DIR-CPO-5239.
+Upload this in the live period after the contract set is the rule source.
+
+The invoice is written so a line-by-line check looks clean. The price certification and the price build-up both say every Microsoft unit is Level D times (1 - 0.1650) times 1.0075, and the Adobe unit is list times (1 - 0.0600) times 1.0075. Those products match the printed unit prices.
+
+Appendix C does not take the 16.50% DIR customer discount off raw Level D for every Enterprise Agreement row. The 16.50% is taken from the publisher discount level, and that level depends on the row:
+- Office Professional/Standard: Level D less 7.5%, then 16.50%, then the 0.75% fee on the customer price.
+- Windows Pro desktop operating system: Level D less 7.5%, then 16.50%, then the fee.
+- Core CAL / Enterprise CAL Suite, including standalone components: Level D less 6%, then 16.50%, then the fee.
+- All other or additional EA licensing: Level D, then 16.50%, then the fee.
+- Adobe: 6% off the publisher price, then the same fee.
+
+What should be flagged
+- 269-05704 Office Professional Plus, 850 x $365.95. Correct unit is 435.00 x 0.925 x 0.835 x 1.0075 = $338.50. Overcharge $27.45 x 850 = $23,332.50.
+- KV3-00368 Windows Pro desktop operating system, 850 x $148.90. Correct unit is 177.00 x 0.925 x 0.835 x 1.0075 = $137.74. Overcharge $11.16 x 850 = $9,486.00.
+- W06-00446 Core CAL user, 850 x $164.05. Correct unit is 195.00 x 0.94 x 0.835 x 1.0075 = $154.20. Overcharge $9.85 x 850 = $8,372.50.
+Leakage on those three lines is $41,191.00.
+
+What should pass
+- 076-01776 Project Standard is additional EA licensing, so Level D with no further publisher cut is the right base. 915.00 x 0.835 x 1.0075 = $769.76.
+- 30002125CC06A12 Acrobat Pro. 174.96 x 0.94 x 1.0075 = $165.70.
+Payment terms are Net 30, which matches Appendix A. Amendment 1 does not change price or payment.
+
 The June 2026 Adobe and May 2026 Microsoft workbooks are the current catalogs Insight posts for this same contract. The 2024 and 2025 orders use the list prices printed on those orders, not necessarily the 2026 workbook.
 
 Sources are public filings: dir.texas.gov contract DIR-CPO-5239, Insight's DIR-CPO-5239 page, the Public Utility Commission of Texas purchase-order file, a City of Grand Prairie meeting attachment, and a Fort Bend County Commissioners Court agenda attachment.

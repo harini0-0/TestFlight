@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import threading
+import traceback
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -154,9 +156,11 @@ def _progress_response(work: Callable[[Session, Callable[[dict], None]], dict]) 
             else:
                 session.rollback()
             events.put({"type": "error", "detail": exc.detail})
-        except Exception:
+        except Exception as exc:
             session.rollback()
-            events.put({"type": "error", "detail": "processing failed"})
+            logging.getLogger("gateway").exception("processing failed")
+            traceback.print_exc()
+            events.put({"type": "error", "detail": f"{exc.__class__.__name__}: {exc}"[:500]})
         finally:
             session.close()
             events.put(None)

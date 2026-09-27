@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { LogoMark } from "@/components/Logo";
 import { api } from "@/lib/api";
 import { money } from "@/lib/format";
 
@@ -17,9 +18,12 @@ export default function FindingsPage() {
   const dollars = open.reduce((sum, finding) => sum + Number(finding.amount || 0), 0);
   return (
     <div className="space-y-4 max-w-4xl">
-      <header className="space-y-2">
-        <h1 className="text-2xl font-semibold tracking-tight">Findings</h1>
-        <p className="text-sm text-slate-600 max-w-2xl">A finding is a live transaction that missed a rule. The amount is the dollars still at risk. Open means nobody has confirmed it yet. Verified means a person accepted it. Dismissed means it was set aside.</p>
+      <header className="flex items-start gap-3.5">
+        <LogoMark className="mt-0.5 h-11 w-11 shrink-0" />
+        <div className="space-y-2">
+          <h1 className="text-2xl font-semibold tracking-tight">Findings</h1>
+          <p className="text-sm text-slate-600 max-w-2xl">A finding is a live transaction that missed a rule. The amount is the dollars still at risk. Open means nobody has confirmed it yet. Verified means a person accepted it. Dismissed means it was set aside.</p>
+        </div>
       </header>
       {findings && rows.length > 0 && (
         <div className="grid grid-cols-3 gap-3">

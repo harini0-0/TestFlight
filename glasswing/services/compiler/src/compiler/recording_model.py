@@ -8,6 +8,7 @@ from glasswing_domain.ontology import Clause
 from glasswing_domain.rules import RuleIR
 
 from compiler.pipeline import compile_clause_deterministic, is_boilerplate
+from compiler.pricing import judge_dir_price
 
 
 class RecordingModel:
@@ -41,6 +42,12 @@ class RecordingModel:
         except json.JSONDecodeError:
             payload = {}
             narrative = user.lower()
+        transaction = payload.get("transaction") or {}
+        if not isinstance(transaction, dict):
+            transaction = {}
+        priced = judge_dir_price(clause_id, str(payload.get("clause_text") or ""), transaction)
+        if priced is not None:
+            return json.dumps(priced)
         failed = "did not prioritize" in narrative or "shortage" in narrative and "fail" in narrative
         if "did not prioritize" in narrative:
             outcome = "violation"

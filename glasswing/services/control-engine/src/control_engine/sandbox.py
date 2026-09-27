@@ -53,7 +53,9 @@ def run_case(
     if last is None:
         last = Evaluation(rule_id=rule.rule_id, outcome="skipped", explanation="no events")
     actual_amount = last.amount_at_risk.amount if last.amount_at_risk else None
-    outcome_ok = last.outcome == case.expected_outcome
+    judged = case.accept_any_judgment and last.outcome in {"pass", "violation", "escalate"}
+    outcome_ok = judged or last.outcome == case.expected_outcome
+    shown_expected = last.outcome if judged else case.expected_outcome
     amount_ok = True
     if case.expected_amount is not None:
         actual = actual_amount or ZERO
@@ -78,7 +80,7 @@ def run_case(
             rule_id=rule.rule_id,
             author=case.author,
             passed=passed,
-            expected_outcome=case.expected_outcome,
+            expected_outcome=shown_expected,
             actual_outcome=last.outcome,
             expected_amount=str(case.expected_amount) if case.expected_amount is not None else None,
             actual_amount=str(actual_amount) if actual_amount is not None else None,

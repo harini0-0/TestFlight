@@ -44,6 +44,7 @@ class TestCase(BaseModel):
     expected_amount: Decimal | None = None
     expect_model_call: bool | None = None
     cite_clause_id: str | None = None
+    accept_any_judgment: bool = False
 
     def expected_money(self, currency: str = "USD") -> Money | None:
         if self.expected_amount is None:

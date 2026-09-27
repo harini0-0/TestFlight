@@ -112,6 +112,7 @@ class RuleIR(BaseModel):
     assertion: str | None = None
     severity: Literal["low", "medium", "high"] = "medium"
     needs_confirmation: list[str] = []
+    confirmations: dict[str, str] = {}
     period: Period | None = None
     eligibility: Eligibility | None = None
     threshold: Threshold | None = None

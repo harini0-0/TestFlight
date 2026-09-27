@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import { LogoMark } from "@/components/Logo";
 import { RuleGraph } from "@/components/RuleGraph";
 import { API_URL, api, fail, streamNdjson, token, type ProgressEvent } from "@/lib/api";
 
@@ -10,16 +11,18 @@ type Rule = {
   rule_id: string;
   rule_type: string;
   needs_confirmation: string[];
+  confirmations?: Record<string, string>;
   source_clause_ids: string[];
   obligation?: { application?: string | null; rate?: string };
   threshold?: { amount?: string };
 };
+type Clause = { clause_id: string; heading?: string; text?: string };
 type Pack = {
   pack_id: string;
   supplier_key: string;
   status: string;
   files: Array<{ document_id: string; kind: string; filename: string }>;
-  bundle: { bundle_id: string; version: number; status: string; active: boolean; rules: Rule[] } | null;
+  bundle: { bundle_id: string; version: number; status: string; active: boolean; rules: Rule[]; clauses?: Clause[] } | null;
 };
 
 const steps = [
@@ -46,8 +49,8 @@ function processingCopy(busy: string, progress: ProgressEvent | null): { title: 
   if (busy === "Running practice checks") {
     return { title: "Running the practice checks", detail: "Each rule is being tested before you review the engine." };
   }
-  if (busy === "Confirming rebate") {
-    return { title: "Saving the rebate confirmation", detail: "The engine will use this application on the next practice run." };
+  if (busy === "Saving confirmation" || busy === "Confirming rebate") {
+    return { title: "Saving the confirmation", detail: "The engine will use this answer on the next practice run." };
   }
   if (busy === "Checking the invoice") {
     return {
@@ -82,6 +85,7 @@ export default function WorkPage() {
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [aiProgress, setAiProgress] = useState<ProgressEvent | null>(null);
+  const [answers, setAnswers] = useState<Record<string, string>>({});
 
   async function load() {
     const body = await api<Pack>(`/v1/packs/${params.id}`);
@@ -215,8 +219,8 @@ export default function WorkPage() {
       );
       setShowFlow(true);
       setRefreshKey((value) => value + 1);
-    } catch {
-      setMessage("");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "The invoice check failed");
     } finally {
       setBusy("");
       setAiProgress(null);
@@ -233,16 +237,79 @@ export default function WorkPage() {
   }
 
   const rules = pack.bundle?.rules || [];
-  const openRebates = rules.filter((rule) => rule.needs_confirmation.includes("application"));
+  const openFields = rules.filter((rule) => rule.needs_confirmation.length > 0);
+  const openRebates = openFields.filter((rule) => rule.needs_confirmation.includes("application"));
   const confirmedRebates = rules.filter((rule) => Boolean(rule.obligation?.application) && !rule.needs_confirmation.includes("application"));
-  const retestOnly = Boolean(pack.bundle) && openRebates.length === 0 && awaitingRetest;
-  const processStage: 1 | 2 | 3 = !pack.bundle ? 1 : openRebates.length ? 2 : awaitingRetest ? 1 : 3;
+  const savedAnswers = rules.flatMap((rule) =>
+    Object.entries(rule.confirmations || {})
+      .filter(([field, value]) => value.trim() && !rule.needs_confirmation.includes(field))
+      .map(([field, value]) => ({ rule, field, value })),
+  );
+  const retestOnly = Boolean(pack.bundle) && openFields.length === 0 && awaitingRetest;
+  const processStage: 1 | 2 | 3 = !pack.bundle ? 1 : openFields.length ? 2 : awaitingRetest ? 1 : 3;
   const stageTone = (panel: 1 | 2 | 3): "current" | "done" | "waiting" => {
     if (panel === processStage) return "current";
     if (panel === 1 && pack.bundle) return "done";
-    if (panel === 2 && pack.bundle && openRebates.length === 0) return "done";
+    if (panel === 2 && pack.bundle && openFields.length === 0) return "done";
     return "waiting";
   };
+
+  function clauseLabel(rule: Rule): string {
+    const clause = pack.bundle?.clauses?.find((item) => item.clause_id === rule.source_clause_ids[0]);
+    const heading = clause?.heading?.trim();
+    return heading || `clause ${rule.source_clause_ids[0]}`;
+  }
+
+  async function confirmField(rule: Rule, field: string, value: string) {
+    if (!pack.bundle) return false;
+    setBusy("Saving confirmation");
+    try {
+      await api(`/v1/bundles/${pack.bundle.bundle_id}/resolve`, { method: "POST", body: JSON.stringify({ rule_id: rule.rule_id, field, value }) });
+      setAwaitingRetest(true);
+      setMessage("Saved. Save and continue when every open field has an answer.");
+      await load();
+      return true;
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save that confirmation");
+      return false;
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function saveAndContinue(fields: Array<{ rule: Rule; field: string }>) {
+    if (!pack.bundle) return;
+    const missing = fields.filter((item) => !(answers[`${item.rule.rule_id}:${item.field}`] || "").trim());
+    if (missing.length) {
+      setMessage("Fill in each open field, then save and continue.");
+      return;
+    }
+    setBusy("Saving confirmation");
+    try {
+      for (const item of fields) {
+        const value = answers[`${item.rule.rule_id}:${item.field}`].trim();
+        await api(`/v1/bundles/${pack.bundle.bundle_id}/resolve`, { method: "POST", body: JSON.stringify({ rule_id: item.rule.rule_id, field: item.field, value }) });
+      }
+      setBusy("Running practice checks");
+      const tested = await api<{ results: typeof report }>(`/v1/bundles/${pack.bundle.bundle_id}/tests`, { method: "POST" });
+      const results = tested.results || [];
+      setReport(results);
+      setAwaitingRetest(false);
+      const failed = results.filter((row) => row.author === "template" && !row.passed);
+      await load();
+      if (failed.length) {
+        setMessage(`${failed.length} practice check${failed.length === 1 ? "" : "s"} failed. Review the results before approval.`);
+        setStep("process");
+      } else {
+        setMessage("Answers saved. Review the engine, then approve it.");
+        setStep("engine");
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save those answers");
+    } finally {
+      setBusy("");
+    }
+  }
 
   const processing = (step === "process" || step === "live") ? processingCopy(busy, aiProgress) : null;
   const meter = aiProgress && aiProgress.total > 0 ? Math.min(100, Math.round((aiProgress.index / aiProgress.total) * 100)) : 8;
@@ -251,9 +318,12 @@ export default function WorkPage() {
     <>
     <div className="flex h-full min-h-0 flex-col gap-3" inert={processing ? true : undefined}>
       <header className="flex items-end justify-between gap-6 shrink-0">
-        <div>
-          <div className="text-xs uppercase tracking-wide text-stone-500">Supplier workspace</div>
-          <h1 className="text-2xl font-semibold tracking-tight mt-1">{pack.supplier_key}</h1>
+        <div className="flex items-center gap-3 min-w-0">
+          <LogoMark className="h-11 w-11 shrink-0" />
+          <div className="min-w-0">
+            <div className="text-xs uppercase tracking-wide text-stone-500">Supplier workspace</div>
+            <h1 className="text-2xl font-semibold tracking-tight mt-1 truncate">{pack.supplier_key}</h1>
+          </div>
         </div>
         <div className="text-sm text-stone-500">{live ? "Live engine running" : pack.bundle ? `Engine v${pack.bundle.version} · ${pack.bundle.status}` : "Not processed"}{live && pack.bundle && !pack.bundle.active ? ` · draft v${pack.bundle.version} waiting` : ""}</div>
       </header>
@@ -310,8 +380,8 @@ export default function WorkPage() {
       {step === "process" && (
         <section key="process" className="step-pane flex-1 min-h-0 flex flex-col gap-3">
           <p className="text-sm text-stone-600 shrink-0">This step turns the {pack.files.length} uploaded file{pack.files.length === 1 ? "" : "s"} into one rule engine, checks it with practice cases, and asks you to approve it once. Live invoices are not checked until you approve.</p>
-          <div className="grid grid-cols-3 gap-3 shrink-0">
-            <div className={processTone(stageTone(1))}>
+          <div className="grid min-h-0 flex-1 grid-cols-3 gap-3">
+            <div className={`${processTone(stageTone(1))} min-h-0 overflow-auto`}>
               <div className="text-sm font-semibold text-ink">1 · Compile and test {processStage > 1 ? "· Done" : ""}</div>
               <p className="text-sm text-stone-700">{retestOnly ? "The rebate confirmations are saved. Run the practice checks on this engine. This does not read the documents again." : pack.bundle ? "Already compiled. Process the documents again only if the uploaded files changed." : "An AI reads the uploaded files, writes one rule engine, and runs the practice checks. Nothing is live yet."}</p>
               <button className={processStage === 1 ? "btn btn-primary" : "btn"} disabled={Boolean(busy)} onClick={async () => {
@@ -319,9 +389,11 @@ export default function WorkPage() {
                   setBusy("Running practice checks");
                   try {
                     const tested = await api<{ results: typeof report }>(`/v1/bundles/${pack.bundle.bundle_id}/tests`, { method: "POST" });
-                    setReport(tested.results || []);
+                    const results = tested.results || [];
+                    setReport(results);
+                    const failed = results.filter((row) => row.author === "template" && !row.passed);
                     setAwaitingRetest(false);
-                    setMessage("Practice checks finished. Review the engine.");
+                    setMessage(failed.length ? `${failed.length} practice check${failed.length === 1 ? "" : "s"} failed. Review the results before approval.` : "Practice checks finished. Review the engine.");
                     await load();
                   } catch {
                     setMessage("");
@@ -337,9 +409,9 @@ export default function WorkPage() {
                   setReport(processed.tests?.results || []);
                   setAwaitingRetest(false);
                   const body = await load();
-                  const rebatesOpen = (body.bundle?.rules || processed.rules || []).some((rule) => rule.needs_confirmation.includes("application"));
-                  if (rebatesOpen) {
-                    setMessage("Processing finished. Confirm how each rebate applies, then view the engine.");
+                  const fieldsOpen = (body.bundle?.rules || processed.rules || []).some((rule) => rule.needs_confirmation.length > 0);
+                  if (fieldsOpen) {
+                    setMessage("Processing finished. Confirm the open fields, then view the engine.");
                     setStep("process");
                   } else {
                     setMessage("Processing finished. The rule engine is ready to review.");
@@ -353,11 +425,11 @@ export default function WorkPage() {
                 }
               }}>{busy === "Compiling the engine" ? "Compiling the engine" : busy === "Running practice checks" ? "Running practice checks" : retestOnly ? "Run practice checks" : "Process documents"}</button>
             </div>
-            <div className={processTone(stageTone(2))}>
-              <div className="text-sm font-semibold text-ink">2 · Confirm how each rebate applies</div>
-              {openRebates.length > 0 || confirmedRebates.length > 0 ? (
+            <div className={`${processTone(stageTone(2))} min-h-0 overflow-auto`}>
+              <div className="text-sm font-semibold text-ink">2 · Confirm open fields</div>
+              {openFields.length > 0 || confirmedRebates.length > 0 || savedAnswers.length > 0 ? (
                 <>
-                  <p className="text-sm text-stone-700">The clause names a rate and a spend line, but not whether that rate is taken on each invoice after the line is crossed. Tick each box to confirm that. Then run the practice checks again.</p>
+                  <p className="text-sm text-stone-700">{openFields.length > 0 ? "Fill in each box, then save and continue. The engine opens after the practice checks." : "These answers are saved."}</p>
                   {openRebates.map((rule) => (
                     <label key={rule.rule_id} className="flex items-start gap-2 text-sm font-medium text-ink">
                       <input
@@ -366,41 +438,77 @@ export default function WorkPage() {
                         disabled={Boolean(busy)}
                         onChange={async (event) => {
                           if (!event.target.checked) return;
-                          setBusy("Confirming rebate");
-                          try {
-                            await api(`/v1/bundles/${pack.bundle?.bundle_id}/resolve`, { method: "POST", body: JSON.stringify({ rule_id: rule.rule_id, field: "application", value: "rate_on_each_invoice_once_crossed" }) });
-                            setAwaitingRetest(true);
-                            setMessage("Application confirmed. Process the tests again, then view the engine.");
-                            await load();
-                          } catch {
-                            event.target.checked = false;
-                            setMessage("");
-                          } finally {
-                            setBusy("");
-                          }
+                          const saved = await confirmField(rule, "application", "rate_on_each_invoice_once_crossed");
+                          if (!saved) event.target.checked = false;
                         }}
                       />
-                      <span>Use the rate on each invoice after the threshold · clause {rule.source_clause_ids[0]}</span>
+                      <span>Use the rate on each invoice after the threshold · {clauseLabel(rule)}</span>
                     </label>
                   ))}
+                  {openFields.filter((rule) => rule.needs_confirmation.includes("expiry")).map((rule) => (
+                    <div key={rule.rule_id} className="space-y-1 text-sm">
+                      <div className="font-medium text-ink">End date · {clauseLabel(rule)}</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          className="field"
+                          type="date"
+                          disabled={Boolean(busy)}
+                          onChange={(event) => {
+                            if (event.target.value) confirmField(rule, "expiry", event.target.value);
+                          }}
+                        />
+                        <button type="button" className="btn" disabled={Boolean(busy)} onClick={() => confirmField(rule, "expiry", "none")}>No end date in this clause</button>
+                      </div>
+                    </div>
+                  ))}
+                  {openFields.flatMap((rule) => rule.needs_confirmation.filter((field) => field !== "application" && field !== "expiry").map((field) => {
+                    const key = `${rule.rule_id}:${field}`;
+                    return (
+                    <label key={key} className="block text-sm font-medium text-ink">
+                      {field.replaceAll("_", " ")} · {clauseLabel(rule)}
+                      <input
+                        className="field mt-1"
+                        disabled={Boolean(busy)}
+                        value={answers[key] || ""}
+                        onChange={(event) => setAnswers((current) => ({ ...current, [key]: event.target.value }))}
+                      />
+                    </label>
+                    );
+                  }))}
+                  {openFields.some((rule) => rule.needs_confirmation.some((field) => field !== "application" && field !== "expiry")) && (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={Boolean(busy) || openRebates.length > 0 || openFields.some((rule) => rule.needs_confirmation.includes("expiry")) || openFields.some((rule) => rule.needs_confirmation.some((field) => field !== "application" && field !== "expiry" && !(answers[`${rule.rule_id}:${field}`] || "").trim()))}
+                      onClick={() => saveAndContinue(openFields.flatMap((rule) => rule.needs_confirmation.filter((field) => field !== "application" && field !== "expiry").map((field) => ({ rule, field }))))}
+                    >
+                      {busy === "Saving confirmation" || busy === "Running practice checks" ? "Saving and continuing" : "Save and continue"}
+                    </button>
+                  )}
                   {confirmedRebates.map((rule) => (
                     <label key={rule.rule_id} className="flex items-start gap-2 text-sm font-medium text-ink">
                       <input type="checkbox" className="mt-1" checked disabled />
-                      <span>Use the rate on each invoice after the threshold · clause {rule.source_clause_ids[0]}</span>
+                      <span>Use the rate on each invoice after the threshold · {clauseLabel(rule)}</span>
+                    </label>
+                  ))}
+                  {savedAnswers.map(({ rule, field, value }) => (
+                    <label key={`${rule.rule_id}:${field}`} className="block text-sm font-medium text-ink">
+                      {field.replaceAll("_", " ")} · {clauseLabel(rule)}
+                      <textarea className="field mt-1 resize-y bg-stone-50 text-stone-700" readOnly rows={3} value={value} />
                     </label>
                   ))}
                 </>
               ) : (
-                <p className="text-sm text-stone-700">Not needed. No clause leaves the rebate application open.</p>
+                <p className="text-sm text-stone-700">Not needed. No clause leaves a field open.</p>
               )}
             </div>
-            <div className={processTone(stageTone(3))}>
+            <div className={`${processTone(stageTone(3))} min-h-0 overflow-auto`}>
               <div className="text-sm font-semibold text-ink">3 · Review the engine {live && pack.bundle?.active ? "· Live" : ""}</div>
               <p className="text-sm text-stone-700">Open the graph and check that each clause, rule, and finding is in place. Approval happens there, after you confirm you have read the rules.</p>
               {!pack.bundle && <p className="text-sm text-ink">Process the documents first.</p>}
-              {openRebates.length > 0 && <p className="text-sm text-ink">Tick the open rebate boxes first.</p>}
+              {openFields.length > 0 && <p className="text-sm text-ink">Answer the open fields first.</p>}
               {awaitingRetest && <p className="text-sm text-ink">Run the practice checks again, then view the engine.</p>}
-              <button className={processStage === 3 ? "btn btn-primary" : "btn"} disabled={!pack.bundle || openRebates.length > 0 || awaitingRetest || Boolean(busy)} onClick={() => setStep("engine")}>View engine</button>
+              <button className={processStage === 3 ? "btn btn-primary" : "btn"} disabled={!pack.bundle || openFields.length > 0 || awaitingRetest || Boolean(busy)} onClick={() => setStep("engine")}>View engine</button>
             </div>
           </div>
           {report.length > 0 && (
@@ -430,9 +538,12 @@ export default function WorkPage() {
             <p className="text-sm text-stone-700">Hover a node for the clause, formula, and ledger. Click a rule to edit it. A live edit becomes the next draft and does not replace the running engine until you approve it.</p>
             <div className="flex items-center gap-2 shrink-0">
             <Link className="btn" href={`/work/${params.id}/network`}>Clause network</Link>
+            {openFields.length > 0 ? (
+              <button className="btn btn-primary shrink-0" type="button" onClick={() => { setMessage("Confirm the open fields on Process, then run the practice checks."); setStep("process"); }}>Confirm open fields</button>
+            ) : (
             <button
               className="btn btn-primary shrink-0"
-              disabled={!pack.bundle || openRebates.length > 0 || Boolean(busy)}
+              disabled={!pack.bundle || Boolean(busy)}
               onClick={() => {
                 setAcks([false, false, false]);
                 setApproveOpen(true);
@@ -440,10 +551,12 @@ export default function WorkPage() {
             >
               Approve rules engine
             </button>
+            )}
             </div>
           </div>
           {!pack.bundle && <p className="text-sm text-ink shrink-0">Process the documents first.</p>}
-          {openRebates.length > 0 && <p className="text-sm text-ink shrink-0">Tick the open rebate boxes on Process before you approve.</p>}
+          {openFields.length > 0 && <p className="text-sm text-ink shrink-0">Open fields are still unanswered. Confirm them on Process before you approve.</p>}
+          {pack.bundle?.active && <p className="text-sm text-stone-600 shrink-0">This engine is already approved. Live checks use this version.</p>}
           <RuleGraph documentId={params.id} refreshKey={refreshKey} />
         </section>
       )}
@@ -465,6 +578,7 @@ export default function WorkPage() {
             ) : (
               <p className="text-xs text-stone-600">This workspace uses the form below. Load Meridian Components from the home page to play the prepared invoice stream.</p>
             )}
+            {!live && <p className="text-xs text-ink">Approve the engine on step 3 before live invoices are checked.</p>}
           </div>
           <div className="panel p-3 min-h-0 flex flex-col gap-1.5 overflow-hidden">
             <h2 className="font-semibold text-sm shrink-0">Check invoices</h2>
@@ -493,7 +607,7 @@ export default function WorkPage() {
                   onChange={(event) => setInvoiceFile(event.target.files?.[0] || null)}
                 />
               </label>
-              <button className="btn btn-primary shrink-0" type="button" disabled={Boolean(busy) || (!invoiceText.trim() && !invoiceFile)} onClick={() => checkInvoice()}>
+              <button className="btn btn-primary shrink-0" type="button" disabled={Boolean(busy) || !live || (!invoiceText.trim() && !invoiceFile)} onClick={() => checkInvoice()}>
                 {busy === "Checking the invoice" ? "Checking the invoice" : "Check invoice"}
               </button>
               <button type="button" className="text-left text-xs font-medium text-accent shrink-0" onClick={() => setShowPeriod((open) => !open)}>{showPeriod ? "Hide document upload" : "Add a document during the period"}</button>
@@ -535,8 +649,10 @@ export default function WorkPage() {
                 await load();
                 setLive(true);
                 setStep("live");
-              } catch {
-                setMessage("");
+              } catch (error) {
+                const note = error instanceof Error ? error.message : "Approval failed";
+                setMessage(note);
+                if (note.toLowerCase().includes("open field") || note.toLowerCase().includes("confirm")) setStep("process");
               } finally {
                 setBusy("");
               }

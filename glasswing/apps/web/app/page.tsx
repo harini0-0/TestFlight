@@ -34,11 +34,9 @@ export default function HomePage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
-      <header className="flex items-end justify-between gap-6 shrink-0">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">AI procurement control</h1>
-          <p className="text-sm text-stone-600 mt-1">Upload the commercial documents, process them into one rule engine, then check live transactions against that engine.</p>
-        </div>
+      <header className="shrink-0">
+        <h1 className="text-2xl font-semibold tracking-tight">AI procurement control</h1>
+        <p className="text-sm text-stone-600 mt-1">Upload the commercial documents, process them into one rule engine, then check live transactions against that engine.</p>
       </header>
       <section className="panel p-4 shrink-0">
         <div className="text-sm font-medium">Start a supplier workspace</div>

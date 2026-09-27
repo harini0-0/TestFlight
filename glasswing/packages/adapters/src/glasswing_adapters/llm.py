@@ -23,7 +23,7 @@ class ChatClient:
         api_key: str,
         base_url: str,
         transport: httpx.BaseTransport | None = None,
-        timeout: float = 120,
+        timeout: float = 300,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -35,6 +35,7 @@ class ChatClient:
         payload = {
             "model": self.model_id,
             "temperature": 0,
+            "thinking": {"type": "disabled"},
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system},
@@ -45,18 +46,29 @@ class ChatClient:
         client_kwargs: dict = {"timeout": self._timeout}
         if self._transport is not None:
             client_kwargs["transport"] = self._transport
-        try:
-            with httpx.Client(**client_kwargs) as client:
-                response = client.post(chat_completions_url(self.base_url), json=payload, headers=headers)
-        except httpx.HTTPError as exc:
-            raise LlmError("the model request failed") from exc
+        response = None
+        last_error: httpx.HTTPError | None = None
+        for _attempt in range(2):
+            try:
+                with httpx.Client(**client_kwargs) as client:
+                    response = client.post(chat_completions_url(self.base_url), json=payload, headers=headers)
+                last_error = None
+                break
+            except httpx.HTTPError as exc:
+                last_error = exc
+        if last_error is not None or response is None:
+            name = last_error.__class__.__name__ if last_error else "HTTPError"
+            raise LlmError(f"the model request failed: {name}") from last_error
         if response.status_code == 401:
             raise LlmError("the model rejected the API key")
         if response.status_code >= 400:
-            raise LlmError(f"the model request failed ({response.status_code})")
+            detail = " ".join(response.text.split())[:240]
+            raise LlmError(f"the model request failed ({response.status_code}) {detail}")
         try:
             message = response.json()["choices"][0]["message"]
             content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                content = message.get("reasoning_content")
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise LlmError("the model returned an empty response") from exc
         if isinstance(content, list):

@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import re
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+
+from pydantic import ValidationError
 
 from actions.machine import Action
 from actions.machine import approve as approve_action
@@ -14,6 +16,7 @@ from actions.machine import propose as propose_action
 from audit.chain import AuditLog
 from compiler.llm_compile import CompilerFailure, LlmCompiler
 from compiler.pipeline import compiler_prompt_hash, score_rule
+from compiler.pricing import is_dir_price_index, judge_dir_price
 from compiler.recording_model import RecordingModel
 from compiler.references import build_clause_network
 from compiler.testgen import template_cases
@@ -34,7 +37,7 @@ from glasswing_adapters.db import (
     SettingRow,
     TransactionRow,
 )
-from glasswing_adapters.llm import LlmError, chat_client_from_env, llm_enabled
+from glasswing_adapters.llm import ChatClient, LlmError, chat_client_from_env, llm_enabled
 from glasswing_adapters.runtime import hash_api_key
 from glasswing_domain.events import AuditEvent
 from glasswing_domain.ids import uuid7
@@ -43,9 +46,10 @@ from glasswing_domain.ontology import Clause
 from glasswing_domain.periods import period_key
 from glasswing_domain.rules import RuleIR, engine_triggers
 from glasswing_domain.transactions import ClockTick, Invoice, PerformanceEvent, SpendEvent
+from ingestion.local_invoice import invoices_from_text
 from ingestion.normalize import NormalizeFailure, normalize_unstructured
 from investigator.service import investigate_exception, judge_natural_language, search_clauses
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -68,6 +72,18 @@ SONNET = "anthropic.claude-sonnet"
 HAIKU = "anthropic.claude-haiku"
 
 
+def _remember_confirmation(data: dict, field: str, value: str) -> None:
+    """Keep a written answer even when the field name is a number on the rule."""
+    notes = dict(data.get("confirmations") or {})
+    notes[field] = value
+    data["confirmations"] = notes
+    prompt = (data.get("decision_prompt") or "").strip()
+    line = f"Confirmed {field.replace('_', ' ')}: {value}"
+    if line not in prompt.splitlines():
+        data["decision_prompt"] = line if not prompt else f"{prompt}\n{line}"
+    data["needs_confirmation"] = [item for item in data.get("needs_confirmation") or [] if item != field]
+
+
 class PlatformError(Exception):
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(detail)
@@ -87,6 +103,16 @@ class ModelBridge:
         if schema_name == "AgentCases":
             return "[]"
         return "{}"
+
+
+class ChatBridge:
+    """Sends natural-language judgments to the configured Sciforium model."""
+
+    def __init__(self, client: ChatClient) -> None:
+        self.client = client
+
+    def complete(self, *, model_id: str, system: str, user: str, schema_name: str) -> str:
+        return self.client.complete(system, user)
 
 
 class Platform:
@@ -249,6 +275,10 @@ class Platform:
             document.status = "compiler_failed"
             self._audit(tenant_id, actor, "bundle.compile_failed", [document_id], {"detail": exc.detail})
             raise PlatformError(422, exc.detail) from exc
+        except LlmError as exc:
+            document.status = "compiler_failed"
+            self._audit(tenant_id, actor, "bundle.compile_failed", [document_id], {"detail": exc.detail})
+            raise PlatformError(503, exc.detail) from exc
         version = self._next_version(tenant_id, document_id)
         bundle = BundleRow(
             id=uuid7(),
@@ -301,11 +331,20 @@ class Platform:
             elif field in {"notice_days", "discount_days", "net_days"}:
                 data[field] = int(value)
             elif field == "expiry":
-                data["expiry"] = value
+                data["expiry"] = None if value in {"", "none", "not_applicable"} else value
                 data["needs_confirmation"] = [item for item in data["needs_confirmation"] if item != "expiry"]
+            elif field in RuleIR.model_fields and field not in {"needs_confirmation", "confirmations", "warning_reasons"}:
+                trial = dict(data)
+                trial[field] = value
+                trial["needs_confirmation"] = [item for item in data["needs_confirmation"] if item != field]
+                try:
+                    RuleIR.model_validate(trial)
+                except (ValidationError, InvalidOperation, ValueError, TypeError):
+                    _remember_confirmation(data, field, value)
+                else:
+                    data = trial
             else:
-                data[field] = value
-                data["needs_confirmation"] = [item for item in data["needs_confirmation"] if item != field]
+                _remember_confirmation(data, field, value)
             rescored = score_rule(
                 RuleIR.model_validate(data),
                 clauses[rule.source_clause_ids[0]].text,
@@ -468,11 +507,17 @@ class Platform:
         return response
 
     def interpret_unstructured(self, tenant_id: str, text: str, supplier_key: str | None, on_progress=None) -> dict:
-        if not llm_enabled():
-            raise PlatformError(503, "the language model is not configured")
         try:
-            client = chat_client_from_env()
-            events = normalize_unstructured(text, client.complete, supplier_key, on_progress=on_progress)
+            local = invoices_from_text(text, supplier_key)
+            if local:
+                if on_progress:
+                    on_progress({"index": 1, "total": 1, "detail": "Reading the printed prices on the invoice."})
+                events = local
+            elif llm_enabled():
+                client = chat_client_from_env()
+                events = normalize_unstructured(text, client.complete, supplier_key, on_progress=on_progress)
+            else:
+                raise PlatformError(422, "no priced lines could be read from the invoice")
         except LlmError as exc:
             raise PlatformError(503, exc.detail) from exc
         except NormalizeFailure as exc:
@@ -876,9 +921,30 @@ class Platform:
         results = []
         document = self._document(tenant_id, bundle.document_id)
         effective = date.fromisoformat(document.effective_date)
-        bridge = ModelBridge(RecordingModel(bundle.supplier_key))
+        bridge = self._language_bridge(bundle.supplier_key)
         seq = self.session.query(EvaluationRow).count() + 1
-        for rule in self._rules(bundle):
+        rules = list(self._rules(bundle))
+        price_anchor = _price_anchor_id(rules)
+        price_contract = "\n".join(rule.clause_text or "" for rule in rules)
+        if not llm_enabled() and isinstance(event, Invoice):
+            covered = {clause_id for rule in rules for clause_id in rule.source_clause_ids}
+            for clause in self._clauses(bundle):
+                if clause.clause_id in covered or not is_dir_price_index(clause.text):
+                    continue
+                rules.append(
+                    RuleIR(
+                        rule_id=f"rule-{clause.clause_id}",
+                        kind="natural_language",
+                        rule_type="natural_language",
+                        supplier_key=bundle.supplier_key,
+                        source_clause_ids=[clause.clause_id],
+                        trigger=["invoice.posted"],
+                        clause_text=clause.text,
+                        decision_prompt="Is any unit price above the Appendix C price, including the administrative fee?",
+                        severity="high",
+                    )
+                )
+        for rule in rules:
             period = rule.period
             pkey = period_key(period, _event_date(event), effective) if period else "none"
             ledger = self._ensure_ledger(tenant_id, bundle, rule, pkey, _currency(event))
@@ -892,7 +958,22 @@ class Platform:
                         "NaturalLanguageRuleInvoked",
                         {"rule_id": rule.rule_id, "transaction_id": event.transaction_id},
                     )
-                    evaluation = judge_natural_language(bridge, rule, json.loads(event.model_dump_json()), SONNET)
+                    priced = None
+                    if isinstance(event, Invoice):
+                        clause = price_contract if rule.rule_id == price_anchor and is_dir_price_index(price_contract) else (rule.clause_text or "")
+                        if is_dir_price_index(clause):
+                            priced = judge_dir_price(rule.source_clause_ids[0], clause, json.loads(event.model_dump_json()))
+                    if priced is not None:
+                        evaluation = _evaluation_from_price(rule, priced)
+                    elif isinstance(event, Invoice) and price_anchor and is_dir_price_index(price_contract):
+                        evaluation = _price_checked_elsewhere(rule)
+                    else:
+                        try:
+                            evaluation = judge_natural_language(bridge, rule, json.loads(event.model_dump_json()), SONNET)
+                        except LlmError as exc:
+                            raise PlatformError(503, exc.detail) from exc
+                        except (ValidationError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                            evaluation = _judgment_unreadable(rule)
                 delta = ZERO
             else:
                 evaluation, delta = evaluate_condition(rule, event, balance_before)
@@ -985,7 +1066,15 @@ class Platform:
                 ledger.balance = str(before + delta)
                 ledger.version += 1
 
-    def _judge(self, bridge: ModelBridge):
+    def _language_bridge(self, supplier_key: str) -> ModelBridge | ChatBridge:
+        if not llm_enabled():
+            return ModelBridge(RecordingModel(supplier_key))
+        try:
+            return ChatBridge(chat_client_from_env())
+        except LlmError as exc:
+            raise PlatformError(503, exc.detail) from exc
+
+    def _judge(self, bridge: ModelBridge | ChatBridge):
         def _inner(rule, event, balance):
             return judge_natural_language(bridge, rule, json.loads(event.model_dump_json()), SONNET)
 
@@ -1166,6 +1255,58 @@ def judge_skip(rule: RuleIR):
     from glasswing_domain.evaluation import Evaluation
 
     return Evaluation(rule_id=rule.rule_id, outcome="skipped", explanation="trigger did not match", model_called=False)
+
+
+def _price_anchor_id(rules: list[RuleIR]) -> str | None:
+    for rule in rules:
+        text = (rule.clause_text or "").lower()
+        if "pricing index" in text:
+            return rule.rule_id
+    for rule in rules:
+        text = (rule.clause_text or "").lower()
+        if "appendix c" in text and ("price" in text or "discount" in text):
+            return rule.rule_id
+    return None
+
+
+def _evaluation_from_price(rule: RuleIR, judged: dict):
+    from glasswing_domain.evaluation import Evaluation, FormulaTrace
+
+    amount = None
+    if judged.get("estimated_amount"):
+        amount = Money(amount=Decimal(str(judged["estimated_amount"])), currency="USD")
+    return Evaluation(
+        rule_id=rule.rule_id,
+        outcome=judged["outcome"],
+        amount_at_risk=amount,
+        amount_estimated=amount is not None,
+        formula_trace=FormulaTrace(formula="Appendix C price", result=judged.get("explanation", "")),
+        explanation=judged.get("explanation", ""),
+        evidence_refs=list(judged.get("evidence_refs") or rule.source_clause_ids),
+        model_called=False,
+    )
+
+
+def _judgment_unreadable(rule: RuleIR):
+    from glasswing_domain.evaluation import Evaluation
+
+    return Evaluation(
+        rule_id=rule.rule_id,
+        outcome="escalate",
+        explanation="The model judgment could not be read. The Appendix C price check still stands.",
+        model_called=True,
+    )
+
+
+def _price_checked_elsewhere(rule: RuleIR):
+    from glasswing_domain.evaluation import Evaluation
+
+    return Evaluation(
+        rule_id=rule.rule_id,
+        outcome="pass",
+        explanation="Unit prices on this invoice are scored on the Appendix C pricing index.",
+        model_called=False,
+    )
 
 
 def _dump(value) -> str:

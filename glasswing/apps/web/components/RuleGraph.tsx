@@ -127,6 +127,7 @@ export function RuleGraph({ documentId, refreshKey = 0, live = false, spotlight 
   const [cursor, setCursor] = useState(0);
   const [hover, setHover] = useState<MapNode | null>(null);
   const [hoverAt, setHoverAt] = useState<{ x: number; y: number } | null>(null);
+  const hideHoverTimer = useRef<number | null>(null);
   const paneRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState<MapNode | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
@@ -290,6 +291,23 @@ export function RuleGraph({ documentId, refreshKey = 0, live = false, spotlight 
     };
   }, [nodes, focusIds, live]);
 
+  function cancelHideHover() {
+    if (hideHoverTimer.current != null) {
+      window.clearTimeout(hideHoverTimer.current);
+      hideHoverTimer.current = null;
+    }
+  }
+
+  function hideHoverSoon() {
+    cancelHideHover();
+    hideHoverTimer.current = window.setTimeout(() => {
+      setHover(null);
+      setHoverAt(null);
+    }, 220);
+  }
+
+  useEffect(() => () => cancelHideHover(), []);
+
   function openEditor(node: MapNode) {
     const fields = FIELDS[node.kind] || [];
     const next: Record<string, string> = {};
@@ -353,6 +371,7 @@ export function RuleGraph({ documentId, refreshKey = 0, live = false, spotlight 
           window.setTimeout(() => frameView(instance), 90);
         }}
         onNodeMouseEnter={(event, node) => {
+          cancelHideHover();
           const source = (node.data.source as MapNode) || null;
           const pane = paneRef.current?.getBoundingClientRect();
           const host = (event.target as HTMLElement).closest(".react-flow__node")?.getBoundingClientRect();
@@ -372,10 +391,7 @@ export function RuleGraph({ documentId, refreshKey = 0, live = false, spotlight 
           setHover(source);
           setHoverAt({ x, y });
         }}
-        onNodeMouseLeave={() => {
-          setHover(null);
-          setHoverAt(null);
-        }}
+        onNodeMouseLeave={hideHoverSoon}
         onNodeClick={(_event, node) => {
           const source = node.data.source as MapNode;
           if (source && FIELDS[source.kind]) openEditor(source);
@@ -386,7 +402,12 @@ export function RuleGraph({ documentId, refreshKey = 0, live = false, spotlight 
         <MiniMap pannable zoomable />
       </ReactFlow>
       {hover && hoverAt && (
-        <aside className="absolute z-10 w-80 max-h-[70%] overflow-auto panel p-4 text-sm shadow-lg space-y-2 pointer-events-none" style={{ left: hoverAt.x, top: hoverAt.y }}>
+        <aside
+          className="absolute z-10 w-80 max-h-[70%] overflow-auto overscroll-contain panel p-4 text-sm shadow-lg space-y-2"
+          style={{ left: hoverAt.x, top: hoverAt.y }}
+          onMouseEnter={cancelHideHover}
+          onMouseLeave={hideHoverSoon}
+        >
           <div className="text-xs uppercase tracking-wide text-slate-500">{NAMES[hover.kind] || hover.kind}</div>
           <div className="font-semibold">{titleFor(hover)}</div>
           {detail.clause_text ? <p className="text-slate-600 whitespace-pre-wrap max-h-32 overflow-auto">{String(detail.clause_text)}</p> : null}

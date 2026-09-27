@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from decimal import Decimal
+import re
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
 from glasswing_domain.evaluation import Evaluation, FormulaTrace
@@ -13,6 +14,18 @@ from glasswing_domain.rules import RuleIR
 
 class LlmClient(Protocol):
     def complete(self, *, model_id: str, system: str, user: str, schema_name: str) -> str: ...
+
+
+def _money_amount(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    match = re.search(r"-?\d+(?:\.\d+)?", str(value).replace(",", "").replace("$", ""))
+    if match is None:
+        return None
+    try:
+        return Decimal(match.group(0))
+    except InvalidOperation:
+        return None
 
 
 def cosine(left: list[float], right: list[float]) -> float:
@@ -64,8 +77,9 @@ def judge_natural_language(llm: LlmClient, rule: RuleIR, event_payload: dict, mo
     data = json.loads(raw)
     amount = None
     estimated = False
-    if data.get("estimated_amount"):
-        amount = Money(amount=Decimal(str(data["estimated_amount"])), currency="USD")
+    parsed_amount = _money_amount(data.get("estimated_amount"))
+    if parsed_amount is not None:
+        amount = Money(amount=parsed_amount, currency="USD")
         estimated = True
     return Evaluation(
         rule_id=rule.rule_id,

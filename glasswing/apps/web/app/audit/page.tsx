@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { LogoMark } from "@/components/Logo";
 import { api } from "@/lib/api";
 
 type AuditEvent = { seq: number; prev_hash: string; row_hash: string; event: { action: string; actor: string } };
@@ -23,9 +24,12 @@ export default function AuditPage() {
   const rows = events || [];
   return (
     <div className="space-y-4 max-w-3xl">
-      <header className="space-y-2">
-        <h1 className="text-2xl font-semibold tracking-tight">Audit</h1>
-        <p className="text-sm text-slate-600">Every approval, upload, and finding decision is stored in order. Each row carries the hash of the previous row, so a missing or altered step breaks the chain. The short codes below are the start of those hashes.</p>
+      <header className="flex items-start gap-3.5">
+        <LogoMark className="mt-0.5 h-11 w-11 shrink-0" />
+        <div className="space-y-2">
+          <h1 className="text-2xl font-semibold tracking-tight">Audit</h1>
+          <p className="text-sm text-slate-600">Every approval, upload, and finding decision is stored in order. Each row carries the hash of the previous row, so a missing or altered step breaks the chain. The short codes below are the start of those hashes.</p>
+        </div>
       </header>
       {events && rows.length === 0 && (
         <div className="panel p-5 text-sm text-slate-600">

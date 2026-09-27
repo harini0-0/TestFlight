@@ -13,6 +13,8 @@ from glasswing_domain.ontology import Clause, Eligibility, Period
 from glasswing_domain.prompts import prompt_sha256
 from glasswing_domain.rules import Obligation, RuleIR, Threshold
 
+from compiler.pricing import is_dir_price_index
+
 HEADING = re.compile(r"(?m)^(?P<section>\d+(?:\.\d+)*)\.?\s+(?P<heading>[^\n]+)$")
 BOILERPLATE = ("governing law", "entire agreement", "whereas", "counterparts", "notices.")
 
@@ -97,6 +99,23 @@ def compile_clause_deterministic(clause: Clause, supplier_key: str) -> RuleIR | 
     """Pattern compiler used by FakeLlm so the pipeline still goes through the LlmClient."""
     text = clause.text
     lowered = text.lower()
+    if is_dir_price_index(text):
+        return RuleIR(
+            rule_id=f"rule-{clause.clause_id}",
+            kind="natural_language",
+            rule_type="natural_language",
+            supplier_key=supplier_key,
+            source_clause_ids=[clause.clause_id],
+            trigger=["invoice.posted"],
+            clause_text=clause.text,
+            decision_prompt=(
+                "Is any unit price above Appendix C? Office Professional and Windows Pro desktop start at "
+                "Level D less 7.5 percent. Core CAL and Enterprise CAL start at Level D less 6 percent. "
+                "Additional EA licensing stays at Level D. Then apply the 16.50 percent Microsoft discount "
+                "or the 6 percent Adobe discount, and include the administrative fee of 0.75 percent of the customer price."
+            ),
+            severity="high",
+        )
     if "rebate" in lowered and "exceeding" in lowered:
         rate = _percent(text) or Decimal("0")
         threshold = _money_phrase(text) or Decimal("0")

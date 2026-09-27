@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { LogoMark } from "@/components/Logo";
 import { api } from "@/lib/api";
 
 export default function AdminPage() {
@@ -17,9 +18,12 @@ export default function AdminPage() {
   }, []);
   return (
     <div className="space-y-4 max-w-xl">
-      <header className="space-y-2">
-        <h1 className="text-2xl font-semibold tracking-tight">Administration</h1>
-        <p className="text-sm text-slate-600">These two numbers change how the engine warns you. They do not change a contracted price or a rebate rate.</p>
+      <header className="flex items-start gap-3.5">
+        <LogoMark className="mt-0.5 h-11 w-11 shrink-0" />
+        <div className="space-y-2">
+          <h1 className="text-2xl font-semibold tracking-tight">Administration</h1>
+          <p className="text-sm text-slate-600">These two numbers change how the engine warns you. They do not change a contracted price or a rebate rate.</p>
+        </div>
       </header>
       <section className="panel p-5 space-y-4">
         <label className="block text-sm">

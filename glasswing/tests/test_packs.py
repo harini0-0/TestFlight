@@ -59,6 +59,74 @@ def test_pack_joins_documents_into_one_engine():
     assert len(detail.json()["files"]) == 2
 
 
+def test_missing_expiry_can_be_cleared_before_approval():
+    headers = _headers()
+    created = client.post("/v1/packs", json={"supplier_key": "Northwind"}, headers=headers)
+    pack_id = created.json()["pack_id"]
+    body = "The contract expires unless notice is given 30 days before the end.\n"
+    uploaded = client.post(
+        f"/v1/packs/{pack_id}/files",
+        content=body.encode(),
+        headers={**headers, "X-Filename": "term.txt", "Content-Type": "text/plain"},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    processed = client.post(f"/v1/packs/{pack_id}/process", headers=headers)
+    assert processed.status_code == 200, processed.text
+    renewal = next(rule for rule in processed.json()["rules"] if rule["rule_type"] == "renewal_notice")
+    assert "expiry" in renewal["needs_confirmation"]
+    bundle_id = processed.json()["bundle_id"]
+    blocked = client.post(f"/v1/bundles/{bundle_id}/approve", headers=headers, json={"human_switches": {}})
+    assert blocked.status_code == 409
+    cleared = client.post(
+        f"/v1/bundles/{bundle_id}/resolve",
+        headers=headers,
+        json={"rule_id": renewal["rule_id"], "field": "expiry", "value": "none"},
+    )
+    assert cleared.status_code == 200, cleared.text
+    updated = next(rule for rule in cleared.json()["rules"] if rule["rule_id"] == renewal["rule_id"])
+    assert "expiry" not in updated["needs_confirmation"]
+    assert updated["expiry"] is None
+    approved = client.post(f"/v1/bundles/{bundle_id}/approve", headers=headers, json={"human_switches": {}})
+    assert approved.status_code == 200, approved.text
+
+
+def test_a_written_confirmation_is_saved_and_clears_the_field():
+    headers = _headers()
+    created = client.post("/v1/packs", json={"supplier_key": "Northwind"}, headers=headers)
+    pack_id = created.json()["pack_id"]
+    body = "DIR may terminate the Contract for convenience.\n"
+    uploaded = client.post(
+        f"/v1/packs/{pack_id}/files",
+        content=body.encode(),
+        headers={**headers, "X-Filename": "term.txt", "Content-Type": "text/plain"},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    processed = client.post(f"/v1/packs/{pack_id}/process", headers=headers)
+    assert processed.status_code == 200, processed.text
+    rule = next(item for item in processed.json()["rules"] if item["rule_type"] == "natural_language")
+    bundle_id = processed.json()["bundle_id"]
+    saved = client.post(
+        f"/v1/bundles/{bundle_id}/resolve",
+        headers=headers,
+        json={"rule_id": rule["rule_id"], "field": "discount_rate", "value": "Adobe 6 percent, Microsoft 16.50 percent"},
+    )
+    assert saved.status_code == 200, saved.text
+    updated = next(item for item in saved.json()["rules"] if item["rule_id"] == rule["rule_id"])
+    assert updated["confirmations"]["discount_rate"] == "Adobe 6 percent, Microsoft 16.50 percent"
+    assert "discount_rate" not in updated["needs_confirmation"]
+    prose = "The minimum customer discount is 6.00% for Adobe and 16.50% for Microsoft."
+    percent = client.post(
+        f"/v1/bundles/{bundle_id}/resolve",
+        headers=headers,
+        json={"rule_id": rule["rule_id"], "field": "discount_percent", "value": prose},
+    )
+    assert percent.status_code == 200, percent.text
+    updated = next(item for item in percent.json()["rules"] if item["rule_id"] == rule["rule_id"])
+    assert updated["confirmations"]["discount_percent"] == prose
+    assert updated["discount_percent"] is None
+    assert "discount_percent" not in updated["needs_confirmation"]
+
+
 def test_streamed_process_saves_the_engine():
     headers = _headers()
     created = client.post("/v1/packs", json={"supplier_key": "Northwind"}, headers=headers)

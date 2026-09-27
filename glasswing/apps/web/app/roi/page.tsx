@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
 import { DollarSankey } from "@/components/DollarSankey";
+import { LogoMark } from "@/components/Logo";
 import { api } from "@/lib/api";
 import { money } from "@/lib/format";
 
@@ -53,9 +54,12 @@ export default function RoiPage() {
   ];
   return (
     <div className="space-y-6">
-      <header className="space-y-2">
-        <h1 className="text-2xl font-semibold tracking-tight">Value</h1>
-        <p className="text-sm text-slate-600 max-w-2xl">These figures come from invoices the live engine has already checked. Spend is the invoice total. At risk is money on findings that are still open. Recovered is money after a confirmed recovery action.</p>
+      <header className="flex items-start gap-3.5">
+        <LogoMark className="mt-0.5 h-11 w-11 shrink-0" />
+        <div className="space-y-2">
+          <h1 className="text-2xl font-semibold tracking-tight">Value</h1>
+          <p className="text-sm text-slate-600 max-w-2xl">These figures come from invoices the live engine has already checked. Spend is the invoice total. At risk is money on findings that are still open. Recovered is money after a confirmed recovery action.</p>
+        </div>
       </header>
       {Number(roi.invoices_processed || 0) === 0 && (
         <div className="panel p-5 text-sm text-slate-600">

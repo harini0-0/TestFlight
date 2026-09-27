@@ -3,7 +3,7 @@ import { warn } from "@/lib/toast";
 export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 const warnings: Record<string, string> = {
-  "resolve ambiguous fields before approval": "Confirm the open fields, including how each rebate applies, before you approve the engine.",
+  "resolve ambiguous fields before approval": "Confirm the open fields on Process before you approve the engine.",
   "template tests are failing": "Template tests are failing. Review the results before approval.",
   "template cases cannot be waived": "Template tests cannot be waived. Fix the failing case before approval.",
   "upload at least one document": "Upload at least one document before processing.",
