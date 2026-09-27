@@ -25,8 +25,8 @@ services:
     runtime: node
     rootDir: glasswing
     plan: free
-    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --dir apps/web build
-    startCommand: pnpm --dir apps/web start -- -p $PORT
+    buildCommand: npx --yes pnpm@9 install --frozen-lockfile && npx --yes pnpm@9 --dir apps/web build
+    startCommand: npx --yes pnpm@9 --dir apps/web start -- -p $PORT
     envVars:
       # Baked into the client bundle at build time. Set to the API URL, then
       # trigger a redeploy so the new value is compiled in.
