@@ -1,0 +1,15 @@
+.venv/
+node_modules/
+apps/web/node_modules/
+apps/web/.next/
+.git/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+__pycache__/
+*.pyc
+var/
+.terraform/
+*.tfstate*
+.DS_Store

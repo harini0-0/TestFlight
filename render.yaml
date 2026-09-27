@@ -1,0 +1,34 @@
+services:
+  # FastAPI gateway (Docker). Serves the API on Render's $PORT.
+  - type: web
+    name: glasswing-api
+    runtime: docker
+    rootDir: gla$$wing
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # Uvicorn must listen on the port Render provides.
+      - key: PORT
+        value: "8000"
+      # SQLite file inside the container (ephemeral on the free plan).
+      - key: DATABASE_URL
+        value: sqlite:///var/glasswing.db
+      # Set this to the web service's URL after the first deploy, then redeploy.
+      - key: GLASSWING_WEB_ORIGIN
+        sync: false
+
+  # Next.js web app (Node).
+  - type: web
+    name: glasswing-web
+    runtime: node
+    rootDir: gla$$wing
+    plan: free
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --dir apps/web build
+    startCommand: pnpm --dir apps/web start -- -p $PORT
+    envVars:
+      # Baked into the client bundle at build time. Set to the API URL, then
+      # trigger a redeploy so the new value is compiled in.
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
