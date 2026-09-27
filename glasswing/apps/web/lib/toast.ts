@@ -26,5 +26,7 @@ export function dismiss(id: number) {
 export function subscribe(listener: Listener) {
   listeners.add(listener);
   listener(toasts);
-  return () => listeners.delete(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
